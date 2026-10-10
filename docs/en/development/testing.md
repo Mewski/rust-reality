@@ -246,7 +246,7 @@ Partial `--cell` runs freeze identity and retain diagnosis but require
 `cargo dev bench stability-merge-cells --output MERGED --cell-dir DIR...`
 before offline Pass evaluation. Hosted qualification runs the four cells as an
 Actions matrix (one cell per runner) and merges with identity binding
-([ADR 0042](../../adr/0042-four-cell-qemu-matrix-parallelism.md); identity `environment.json` binds tool digests only, with per-runner `controller-host.json` beside it); ordinary
+([ADR 0042](../../adr/0042-four-cell-qemu-matrix-parallelism.md), [ADR 0053](../../adr/0053-native-identity-environment-omits-host-kernel.md); identity `environment.json` binds tool digests only, with per-runner `controller-host.json` beside it); ordinary
 runners keep one cell's vCPU affinity budget under `HostLock` and fixed fixture
 ports. It requires a clean checkout at the candidate's embedded
 commit and preserves source, contract, harness and executable copies. Each stress

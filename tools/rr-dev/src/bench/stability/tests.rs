@@ -223,9 +223,13 @@ fn native_interop_reconstructs_payload_trace_and_external_image_bindings() {
     );
     let mut evidence: schema::Evidence = serde_json::from_value(fixture()).unwrap();
     evidence.identity.candidate = save("rust-reality", b"product");
-    evidence.identity.environment = save("environment.json", &serde_json::to_vec(&json!({
-        "host_kernel":"Linux", "xray_sha256":xray.sha256,"xray_identity":xray.identity,"openssl_sha256":openssl.sha256
-    })).unwrap());
+    evidence.identity.environment = save(
+        "environment.json",
+        &serde_json::to_vec(&json!({
+            "xray_sha256":xray.sha256,"xray_identity":xray.identity,"openssl_sha256":openssl.sha256
+        }))
+        .unwrap(),
+    );
     let payload: Vec<_> = (0_u8..=255).cycle().take(1_048_576).collect();
     let summary: Value = serde_json::from_str(
         &crate::bench::no_ccs::summary_json(

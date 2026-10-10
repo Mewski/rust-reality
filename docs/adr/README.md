@@ -92,3 +92,4 @@ of the law is what it is.
 | [0050](0050-guest-clock-oneshot-realtime-bind.md) | One-shot guest REALTIME bind before kvm-clock witness | Accepted |
 | [0051](0051-scale-vm-rss-envelope-by-role-gib.md) | Scale VM RSS envelopes by role GiB | Accepted |
 | [0052](0052-libtest-lifecycle-stdout-is-pure-receipt.md) | Libtest lifecycle stdout is a pure receipt | Accepted |
+| [0053](0053-native-identity-environment-omits-host-kernel.md) | Native identity environment omits host_kernel | Accepted |
