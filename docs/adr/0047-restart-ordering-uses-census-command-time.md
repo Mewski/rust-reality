@@ -24,8 +24,9 @@ action timestamp and falsely rejected every well-ordered handoff restart.
 
 1. `restart_ingress` returns `(peer, census_completed_unix_ms)` where the time
    is the `ss` command completion, not the LINE-A action completion.
-2. `product_logs` requires `ack_completed >= census_completed` using that census
-   command time (ADR 0041 semantics unchanged).
+2. `product_logs` orders LANDING ACK against that census command time
+   (ADR 0041 semantics). Cross-guest absolute comparison applies
+   `clock_guard_ms` ([ADR 0058](0058-restart-ack-census-uses-clock-guard.md)).
 3. No sleep, hold, or wall-clock amplification. Runtime handshake unchanged.
 
 ## Consequences
