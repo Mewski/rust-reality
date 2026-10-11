@@ -2041,11 +2041,13 @@ fn restart_ack_census_ordering_tolerates_bounded_cross_guest_skew() {
     // LINE-A ss census completed 1791731119696; LANDING ACK completed
     // 1791731119695 (−1 ms). Same-guest send started at census completion.
     // Strict ack >= census falsely fail-closed a correct handshake.
-    let contract: super::schema::Contract =
-        serde_json::from_str(super::schema::CONTRACT).unwrap();
+    let contract: super::schema::Contract = serde_json::from_str(super::schema::CONTRACT).unwrap();
     let guard = contract.clock_guard_ms();
     assert!(guard >= 1);
-    assert!(super::action::restart_ack_follows_census(1_791_731_119_696, 1_791_731_119_695, guard).is_ok());
+    assert!(
+        super::action::restart_ack_follows_census(1_791_731_119_696, 1_791_731_119_695, guard)
+            .is_ok()
+    );
     // Exact equality and ACK-after-census still pass.
     assert!(super::action::restart_ack_follows_census(100, 100, guard).is_ok());
     assert!(super::action::restart_ack_follows_census(100, 101, guard).is_ok());
