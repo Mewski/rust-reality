@@ -49,6 +49,7 @@ pub(super) fn failures(repo: &Path, entries: &[TrackedEntry]) -> Vec<String> {
     let mut failures = tracked_file_failures(repo, entries);
     failures.extend(onboarding_failures(repo));
     failures.extend(machine_path_failures(repo, entries));
+    failures.extend(cargo_dev_alias_failures(repo));
     failures
 }
 
@@ -298,6 +299,54 @@ fn is_placeholder_user(user: &str) -> bool {
     ["example", "home", "user", "username"].contains(&normalized.as_str())
 }
 
+/// Root `cargo dev` must bootstrap with `--locked` (ADR 0056).
+///
+/// An unlocked alias lets `cargo run` rewrite `tools/Cargo.lock` before
+/// `perf freeze` checks worktree cleanliness, which fails Native Exact-head
+/// as a Class B harness defect.
+fn cargo_dev_alias_failures(repo: &Path) -> Vec<String> {
+    let path = repo.join(".cargo/config.toml");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) => {
+            return vec![format!("could not read .cargo/config.toml: {error}")];
+        }
+    };
+    match cargo_dev_alias_locked_contract(&text) {
+        Ok(()) => Vec::new(),
+        Err(message) => vec![message],
+    }
+}
+
+fn cargo_dev_alias_locked_contract(config: &str) -> Result<(), String> {
+    let mut in_alias = false;
+    for line in config.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_alias = trimmed == "[alias]";
+            continue;
+        }
+        if !in_alias || trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some(rest) = trimmed.strip_prefix("dev") else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let Some(rest) = rest.strip_prefix('=') else {
+            continue;
+        };
+        let value = rest.trim().trim_matches('"');
+        if value.split_whitespace().any(|word| word == "--locked") {
+            return Ok(());
+        }
+        return Err(
+            ".cargo/config.toml [alias] dev must pass --locked to cargo run (ADR 0056)".to_owned(),
+        );
+    }
+    Err(".cargo/config.toml is missing [alias] dev = ... (ADR 0056)".to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,5 +375,22 @@ mod tests {
         assert!(is_script_shebang(b"#!/usr/bin/env python3 -I"));
         assert!(!is_script_shebang(b"#!/usr/bin/perl"));
         assert!(!is_script_shebang(b"ordinary text"));
+    }
+
+    #[test]
+    fn cargo_dev_alias_requires_locked() {
+        assert!(
+            cargo_dev_alias_locked_contract(
+                "[alias]\ndev = \"run --quiet --locked --manifest-path tools/Cargo.toml --package rr-dev --\"\n"
+            )
+            .is_ok()
+        );
+        assert!(
+            cargo_dev_alias_locked_contract(
+                "[alias]\ndev = \"run --quiet --manifest-path tools/Cargo.toml --package rr-dev --\"\n"
+            )
+            .is_err()
+        );
+        assert!(cargo_dev_alias_locked_contract("[build]\ntarget = \"x\"\n").is_err());
     }
 }

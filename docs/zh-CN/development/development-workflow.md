@@ -10,7 +10,8 @@
 
 使用 [`rust-toolchain.toml`](../../../rust-toolchain.toml) 固定的工具链。
 规范的开发者入口是 `cargo dev`（独立 `tools/` 工作区中的 `rr-dev` 二进制，
-通过根目录 Cargo alias 暴露）：
+通过根目录 Cargo alias 暴露；alias 对 `tools/Cargo.toml` 使用
+`cargo run --locked`，见 [ADR 0056](../../adr/0056-cargo-dev-alias-uses-locked.md)）：
 
 ```shell
 cargo dev --help        # 查看命令组

@@ -10,7 +10,9 @@ that also bind agents see [AGENTS.md](../../../AGENTS.md).
 
 Use the toolchain pinned by [`rust-toolchain.toml`](../../../rust-toolchain.toml).
 The canonical developer interface is `cargo dev` (the `rr-dev` binary in the
-independent `tools/` workspace, exposed through a root cargo alias):
+independent `tools/` workspace, exposed through a root cargo alias that runs
+`cargo run --locked` against `tools/Cargo.toml`; see
+[ADR 0056](../../adr/0056-cargo-dev-alias-uses-locked.md)):
 
 ```shell
 cargo dev --help        # discover the command groups
