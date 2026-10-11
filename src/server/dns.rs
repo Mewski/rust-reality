@@ -170,6 +170,7 @@ struct UpstreamAnswer {
 }
 
 /// One upstream failure, before conversion into a shareable [`DnsError`].
+#[derive(Debug)]
 enum UpstreamError {
     NotFound {
         nxdomain: bool,
@@ -304,6 +305,15 @@ impl DnsBackend for HickoryBackend {
 }
 
 fn classify_net_error(error: NetError) -> UpstreamError {
+    // Keep timeout / NXDOMAIN / NODATA semantics explicit. Truncation,
+    // foreign-class answers, and transport-level connection closure stay
+    // distinct Failed messages so a Hickory 0.26.x NetError reshape cannot
+    // silently collapse them into an opaque Display string.
+    if error.is_connection_closed() {
+        return UpstreamError::Failed(Arc::from(
+            "upstream DNS connection closed before a usable answer",
+        ));
+    }
     match error {
         NetError::Timeout => UpstreamError::Failed(Arc::from("upstream DNS query timed out")),
         NetError::Dns(HickoryDnsError::NoRecordsFound(no_records)) => UpstreamError::NotFound {
@@ -312,6 +322,12 @@ fn classify_net_error(error: NetError) -> UpstreamError {
                 .negative_ttl
                 .map(|ttl| Duration::from_secs(u64::from(ttl))),
         },
+        NetError::Truncated => UpstreamError::Failed(Arc::from(
+            "upstream DNS response was truncated without a usable TCP fallback",
+        )),
+        NetError::ForeignClassRecord { .. } => UpstreamError::Failed(Arc::from(
+            "upstream DNS response contained a foreign-class record",
+        )),
         other => UpstreamError::Failed(Arc::from(other.to_string())),
     }
 }
@@ -1063,12 +1079,60 @@ mod tests {
 
     use tokio::time;
 
+    use std::io;
+
+    use hickory_resolver::{
+        net::NetError,
+        proto::rr::{DNSClass, Name, RecordType},
+    };
+
     use super::{
         DnsBackend, DnsCacheConfig, DnsError, DnsResolver, DnsServerSpec, IpFamily, UpstreamAnswer,
-        UpstreamError, parse_server_spec,
+        UpstreamError, classify_net_error, parse_server_spec,
     };
     use crate::runtime::ResourceGovernor;
     use crate::runtime::policy::ResourceGovernorPolicy;
+
+    #[test]
+    fn classify_net_error_preserves_timeout_and_protocol_failures() {
+        match classify_net_error(NetError::Timeout) {
+            UpstreamError::Failed(message) => {
+                assert_eq!(&*message, "upstream DNS query timed out");
+            }
+            other => panic!("unexpected classification: {other:?}"),
+        }
+
+        match classify_net_error(NetError::Truncated) {
+            UpstreamError::Failed(message) => assert!(
+                message.contains("truncated"),
+                "truncated must stay explicit: {message}"
+            ),
+            other => panic!("unexpected classification: {other:?}"),
+        }
+
+        let foreign = NetError::ForeignClassRecord {
+            record_name: Name::from_ascii("example.test.").expect("name"),
+            record_class: DNSClass::CH,
+            record_type: RecordType::TXT,
+        };
+        match classify_net_error(foreign) {
+            UpstreamError::Failed(message) => assert!(
+                message.contains("foreign-class"),
+                "foreign-class must stay explicit: {message}"
+            ),
+            other => panic!("unexpected classification: {other:?}"),
+        }
+
+        let closed = NetError::from(io::Error::from(io::ErrorKind::ConnectionReset));
+        assert!(closed.is_connection_closed());
+        match classify_net_error(closed) {
+            UpstreamError::Failed(message) => assert!(
+                message.contains("connection closed"),
+                "connection closed must stay explicit: {message}"
+            ),
+            other => panic!("unexpected classification: {other:?}"),
+        }
+    }
 
     /// A scripted backend: counts calls, optionally delays, and replays one
     /// programmable outcome per call.
