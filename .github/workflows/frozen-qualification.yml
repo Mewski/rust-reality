@@ -78,6 +78,11 @@ jobs:
         with:
           name: hosted-qemu-campaign-${{ env.HEAD_SHA }}
           path: ${{ env.BUNDLE }}
+      - name: Restore frozen executable inputs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: hosted-qemu-frozen-exec-${{ env.HEAD_SHA }}
+          path: ${{ env.BUNDLE }}
       - name: Restore every native package receipt separately
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -95,8 +100,14 @@ jobs:
           for key, name in [('candidate','rust-reality'),('evaluator','rr-dev')]:
               record = identity[key]
               path = root/name
-              if record['path'] != name or path.is_symlink() or not path.is_file():
-                  raise SystemExit('Invalid frozen executable path')
+              if record['path'] != name:
+                  raise SystemExit(f'Invalid frozen executable path: identity {key} path {record["path"]!r} != {name!r}')
+              if path.is_symlink() or not path.is_file():
+                  tops = sorted(p.name for p in root.iterdir())[:40]
+                  raise SystemExit(
+                      f'Invalid frozen executable path: {name} exists={path.exists()} '
+                      f'is_file={path.is_file()} is_symlink={path.is_symlink()} tops={tops!r}'
+                  )
               if hashlib.file_digest(path.open('rb'),'sha256').hexdigest() != record['sha256']:
                   raise SystemExit('Frozen executable digest mismatch')
           environment_path = root/'environment.json'

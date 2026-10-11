@@ -427,6 +427,24 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
           compression-level: 9
+      # ADR 0054: tiny sibling of the 26GiB campaign so Frozen acceptance does not
+      # depend on trailing top-level binaries surviving a 45k-file extract.
+      - name: Stage frozen executable inputs
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/rr-frozen-exec"
+          for name in rr-dev rust-reality xray openssl environment.json; do
+            cp "$RUNNER_TEMP/rr-cloud-campaign/$name" "$RUNNER_TEMP/rr-frozen-exec/$name"
+          done
+          chmod 0755 "$RUNNER_TEMP/rr-frozen-exec/rr-dev" "$RUNNER_TEMP/rr-frozen-exec/rust-reality"             "$RUNNER_TEMP/rr-frozen-exec/xray" "$RUNNER_TEMP/rr-frozen-exec/openssl"
+      - name: Retain frozen executable inputs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: hosted-qemu-frozen-exec-${{ env.HEAD_SHA }}
+          path: ${{ runner.temp }}/rr-frozen-exec/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 9
       - name: Retain merge diagnosis on failure
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
