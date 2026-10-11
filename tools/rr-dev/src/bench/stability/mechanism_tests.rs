@@ -61,7 +61,7 @@ fn fixture() -> (Workspace, schema::Identity, schema::Check) {
         &workspace,
         "environment.json",
         &serde_json::to_vec(&json!({
-            "host_kernel":"Linux", "xray_sha256":xray.sha256, "xray_identity":"stock Xray",
+            "xray_sha256":xray.sha256, "xray_identity":"stock Xray",
             "openssl_sha256":"d".repeat(64)
         }))
         .unwrap(),

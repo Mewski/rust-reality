@@ -991,7 +991,7 @@ mod tests {
             candidate: save("rust-reality", b"rust-reality"), evaluator: save("rr-dev", b"rr-dev"),
             contract: save("contract", b"contract"), workload: save("workload", b"workload"),
             environment: save("environment", &serde_json::to_vec(&serde_json::json!({
-                "host_kernel":"Linux","xray_identity":"stock Xray","xray_sha256":binary("xray").sha256,"openssl_sha256":binary("openssl").sha256
+                "xray_identity":"stock Xray","xray_sha256":binary("xray").sha256,"openssl_sha256":binary("openssl").sha256
             })).unwrap()),
         };
         let control: Vec<_> = (0_u8..=255).cycle().take(4096).collect();

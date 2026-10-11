@@ -77,6 +77,10 @@ pub struct Receipt {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Environment {
+    /// Optional legacy field. ADR 0042 moved per-runner `uname` to
+    /// `controller-host.json` so matrix cells share one environment digest.
+    /// Older receipts may still embed it; identity binding uses digests only.
+    #[serde(default)]
     host_kernel: String,
     xray_sha256: String,
     xray_identity: String,
@@ -85,14 +89,15 @@ pub struct Environment {
 
 impl Environment {
     pub fn binds_xray(&self, sha256: &str, identity: &str) -> bool {
-        !self.host_kernel.is_empty()
-            && !identity.is_empty()
+        !identity.is_empty()
+            && !sha256.is_empty()
             && self.xray_sha256 == sha256
             && self.xray_identity == identity
     }
     pub fn binds_external_images(&self, xray: &str, openssl: &str) -> bool {
-        !self.host_kernel.is_empty()
-            && !self.xray_identity.is_empty()
+        !self.xray_identity.is_empty()
+            && !xray.is_empty()
+            && !openssl.is_empty()
             && self.xray_sha256 == xray
             && self.openssl_sha256 == openssl
     }
@@ -125,8 +130,9 @@ pub fn verify(
         || !receipt.xray.immutable_during_run
         || receipt.xray.sha256 != environment.xray_sha256
         || receipt.openssl.sha256 != environment.openssl_sha256
-        || environment.host_kernel.is_empty()
         || environment.xray_identity.is_empty()
+        || environment.xray_sha256.is_empty()
+        || environment.openssl_sha256.is_empty()
         || !receipt.openssl.version.starts_with(openssl_prefix)
         || receipt.openssl.identity.lines().next() != Some(receipt.openssl.version.as_str())
         || receipt.openssl.tls != "1.3"
@@ -179,4 +185,30 @@ pub fn verify(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_environment_without_host_kernel_binds_external_images() {
+        let environment = parse_environment(
+            br#"{"openssl_sha256":"aa","xray_identity":"stock Xray","xray_sha256":"bb"}"#,
+        )
+        .expect("ADR 0042 environment.json must parse without host_kernel");
+        assert!(environment.binds_xray("bb", "stock Xray"));
+        assert!(environment.binds_external_images("bb", "aa"));
+        assert!(!environment.binds_xray("cc", "stock Xray"));
+        assert!(!environment.binds_external_images("", "aa"));
+    }
+
+    #[test]
+    fn legacy_environment_with_host_kernel_still_parses() {
+        let environment = parse_environment(
+            br#"{"host_kernel":"Linux","openssl_sha256":"aa","xray_identity":"stock Xray","xray_sha256":"bb"}"#,
+        )
+        .expect("legacy receipts that still embed host_kernel must remain readable");
+        assert!(environment.binds_external_images("bb", "aa"));
+    }
 }
