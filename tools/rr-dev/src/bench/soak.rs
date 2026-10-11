@@ -1380,12 +1380,14 @@ fn run_rust_attempt(plan: &SoakPlan, run: &RunDirectory) -> Result<RustSoakOutco
         "-msg".to_owned(),
         "-state".to_owned(),
     ];
+    let mut cover_env = vec![("PATH".to_owned(), "/usr/local/bin:/usr/bin:/bin".to_owned())];
+    cover_env.extend(no_ccs::openssl_conf_env(&openssl.path));
     let mut cover = Child::spawn_isolated(
         "soak-handoff-cover",
         &openssl.path,
         &cover_args,
         workspace.path(),
-        &[("PATH".to_owned(), "/usr/local/bin:/usr/bin:/bin".to_owned())],
+        &cover_env,
         &cover_log,
     )
     .map_err(|error| error.to_string())?;

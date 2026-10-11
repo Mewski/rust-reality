@@ -94,3 +94,4 @@ of the law is what it is.
 | [0052](0052-libtest-lifecycle-stdout-is-pure-receipt.md) | Libtest lifecycle stdout is a pure receipt | Accepted |
 | [0053](0053-native-identity-environment-omits-host-kernel.md) | Native identity environment omits host_kernel | Accepted |
 | [0054](0054-frozen-exec-sibling-artifact.md) | Frozen executable sibling artifact | Accepted |
+| [0055](0055-relocated-openssl-uses-colocated-conf.md) | Relocated OpenSSL uses colocated OPENSSL_CONF | Accepted |

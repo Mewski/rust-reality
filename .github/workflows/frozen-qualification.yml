@@ -120,6 +120,10 @@ jobs:
               path = root/name
               if path.is_symlink() or not path.is_file() or hashlib.file_digest(path.open('rb'),'sha256').hexdigest() != environment[key]:
                   raise SystemExit('External fixture executable digest mismatch')
+          # ADR 0055: relocated frozen openssl must carry a colocated openssl.cnf.
+          openssl_cnf = root/'openssl.cnf'
+          if openssl_cnf.is_symlink() or not openssl_cnf.is_file():
+              raise SystemExit('Frozen openssl.cnf missing next to openssl binary')
           for name in ['rr-dev','rust-reality','xray','openssl']:
               (root/name).chmod(0o755)
           PY

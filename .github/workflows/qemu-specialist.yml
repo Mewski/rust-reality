@@ -416,6 +416,8 @@ jobs:
           cp "$RUNNER_TEMP/rr-qemu-prepare/bin/rust-reality" "$RUNNER_TEMP/rr-cloud-campaign/rust-reality"
           cp "$RUNNER_TEMP/rr-qemu-prepare/tools/xray/xray" "$RUNNER_TEMP/rr-cloud-campaign/xray"
           cp "$RUNNER_TEMP/rr-qemu-prepare/tools/openssl/bin/openssl" "$RUNNER_TEMP/rr-cloud-campaign/openssl"
+          # ADR 0055: relocated openssl needs a colocated openssl.cnf (OPENSSLDIR is absolute).
+          cp "$RUNNER_TEMP/rr-qemu-prepare/tools/openssl/ssl/openssl.cnf" "$RUNNER_TEMP/rr-cloud-campaign/openssl.cnf"
           chmod 0755 "$RUNNER_TEMP/rr-cloud-campaign/rr-dev" "$RUNNER_TEMP/rr-cloud-campaign/rust-reality" \
             "$RUNNER_TEMP/rr-cloud-campaign/xray" "$RUNNER_TEMP/rr-cloud-campaign/openssl"
       - name: Retain campaign evidence without private fixture material
@@ -429,11 +431,12 @@ jobs:
           compression-level: 9
       # ADR 0054: tiny sibling of the 26GiB campaign so Frozen acceptance does not
       # depend on trailing top-level binaries surviving a 45k-file extract.
+      # ADR 0055: include openssl.cnf so relocated OPENSSLDIR does not break req.
       - name: Stage frozen executable inputs
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/rr-frozen-exec"
-          for name in rr-dev rust-reality xray openssl environment.json; do
+          for name in rr-dev rust-reality xray openssl openssl.cnf environment.json; do
             cp "$RUNNER_TEMP/rr-cloud-campaign/$name" "$RUNNER_TEMP/rr-frozen-exec/$name"
           done
           chmod 0755 "$RUNNER_TEMP/rr-frozen-exec/rr-dev" "$RUNNER_TEMP/rr-frozen-exec/rust-reality"             "$RUNNER_TEMP/rr-frozen-exec/xray" "$RUNNER_TEMP/rr-frozen-exec/openssl"

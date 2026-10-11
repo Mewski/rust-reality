@@ -22,7 +22,7 @@
 //! shows both directions; the client's own CCS is expected and irrelevant, so an
 //! assertion that ignored direction would fail every run for the wrong reason.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::{hash, perf::json_out::Json, process::Tool};
 
@@ -243,10 +243,48 @@ fn owned(args: &[&str]) -> Vec<String> {
     args.iter().map(|arg| (*arg).to_owned()).collect()
 }
 
+/// Locates an OpenSSL config that travels with a relocated `openssl` binary.
+///
+/// Frozen packaging historically shipped only the binary while `OPENSSLDIR` was
+/// baked to the prepare runner's absolute path. A colocated `openssl.cnf` (flat
+/// sibling or install-layout `../ssl/openssl.cnf`) lets callers set
+/// `OPENSSL_CONF` without rewriting the binary digest.
+#[must_use]
+pub fn colocated_openssl_conf(openssl_bin: &Path) -> Option<PathBuf> {
+    let parent = openssl_bin.parent()?;
+    let candidates = [
+        Some(parent.join("openssl.cnf")),
+        Some(parent.join("ssl").join("openssl.cnf")),
+        parent
+            .parent()
+            .map(|root| root.join("ssl").join("openssl.cnf")),
+    ];
+    candidates.into_iter().flatten().find(|path| path.is_file())
+}
+
+/// Environment pairs that make a relocated OpenSSL binary find its config.
+///
+/// Honours an already-set process `OPENSSL_CONF`. When unset, binds to a
+/// colocated config if one exists. Callers that spawn long-lived `s_server`
+/// covers MUST apply the same pairs.
+#[must_use]
+pub fn openssl_conf_env(openssl_bin: &Path) -> Vec<(String, String)> {
+    if std::env::var_os("OPENSSL_CONF").is_some() {
+        return Vec::new();
+    }
+    match colocated_openssl_conf(openssl_bin) {
+        Some(path) => vec![("OPENSSL_CONF".to_owned(), path.display().to_string())],
+        None => Vec::new(),
+    }
+}
+
 /// Runs one `openssl` invocation, returning its stdout.
 fn openssl(openssl_bin: &Path, args: &[String]) -> Result<String, String> {
-    let outcome = Tool::new(openssl_bin.display().to_string())
-        .args(args.to_vec())
+    let mut tool = Tool::new(openssl_bin.display().to_string()).args(args.to_vec());
+    for (key, value) in openssl_conf_env(openssl_bin) {
+        tool = tool.env(key, value);
+    }
+    let outcome = tool
         .probe()
         .map_err(|error| format!("openssl {} failed: {error}", args.join(" ")))?;
     if !outcome.success() {
@@ -535,6 +573,46 @@ mod tests {
         let error = check_openssl_version("OpenSSL 3.4.0 1 Jan 2025\n").unwrap_err();
         assert!(error.contains("3.5.6"), "{error}");
         assert!(check_openssl_version("").is_err());
+    }
+
+    #[test]
+    fn colocated_openssl_conf_prefers_flat_sibling_then_install_layout() {
+        let root = std::env::temp_dir().join(format!(
+            "rr-openssl-conf-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        let flat = root.join("openssl");
+        std::fs::write(&flat, b"openssl").unwrap();
+        assert!(colocated_openssl_conf(&flat).is_none());
+
+        let flat_cnf = root.join("openssl.cnf");
+        std::fs::write(&flat_cnf, b"# flat\n").unwrap();
+        assert_eq!(
+            colocated_openssl_conf(&flat).as_deref(),
+            Some(flat_cnf.as_path())
+        );
+
+        let install_bin = root.join("bin").join("openssl");
+        std::fs::write(&install_bin, b"openssl").unwrap();
+        let install_cnf = root.join("ssl").join("openssl.cnf");
+        std::fs::create_dir_all(install_cnf.parent().unwrap()).unwrap();
+        std::fs::write(&install_cnf, b"# install\n").unwrap();
+        assert_eq!(
+            colocated_openssl_conf(&install_bin).as_deref(),
+            Some(install_cnf.as_path())
+        );
+
+        let env = openssl_conf_env(&flat);
+        assert_eq!(env.len(), 1);
+        assert_eq!(env[0].0, "OPENSSL_CONF");
+        assert_eq!(env[0].1, flat_cnf.display().to_string());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Both SANs matter: REALITY dials the cover by name and some paths verify by
@@ -910,7 +988,7 @@ pub fn run(suite: &NoCcsSuite) -> Result<Json, String> {
         &suite.openssl_bin,
         &cover_server_args(cover_port, &certificate),
         workspace.path(),
-        &[],
+        &openssl_conf_env(&suite.openssl_bin),
         &trace_path,
     )
     .map_err(|error| error.to_string())?;
