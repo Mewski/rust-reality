@@ -9,7 +9,7 @@ QEMU prepare, all four QEMU cells, merge, frozen-exec identity verify
 (ADR 0054), full gate, and lifecycle. Native interop then failed immediately:
 
 ```text
-Can't open "/home/runner/work/_temp/rr-qemu-prepare/tools/openssl/ssl/openssl.cnf"
+Can't open "<RUNNER_TEMP>/rr-qemu-prepare/tools/openssl/ssl/openssl.cnf"
 for reading, No such file or directory
 ```
 
