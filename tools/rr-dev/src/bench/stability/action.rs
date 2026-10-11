@@ -400,6 +400,25 @@ pub(super) fn restart_ack(action: &Action) -> Result<(String, u64), String> {
     Ok((peer, action.commands[0].completed_unix_ms))
 }
 
+/// Cross-guest census→ACK ordering under bounded clock skew (ADR 0058).
+///
+/// LINE-A census completion and LANDING ACK completion come from different
+/// guest clocks. Same-guest wire order is already enforced by
+/// [`restart_ingress`] (census ≤ ACK send start). Comparing the two guests'
+/// absolute timestamps must tolerate `clock_guard_ms` of apparent inversion —
+/// Frozen `38145481092` handoff/ordinary retained a correct handshake with
+/// ACK at 9695 and census at 9696 (−1 ms). No sleep.
+pub(super) fn restart_ack_follows_census(
+    census_completed: u64,
+    ack_completed: u64,
+    clock_guard_ms: u64,
+) -> Result<(), String> {
+    if ack_completed.saturating_add(clock_guard_ms) < census_completed {
+        return Err("landing abort ACK predates LINE-A census".to_owned());
+    }
+    Ok(())
+}
+
 /// Exact sockets and command interval witnessed by a successful stale eviction.
 /// The caller must verify the action against its cell, role and fixed schedule.
 pub(super) fn stale_evictions(action: &Action) -> Result<Vec<(String, u64, u64)>, String> {

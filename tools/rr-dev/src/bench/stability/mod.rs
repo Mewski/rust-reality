@@ -129,12 +129,14 @@ fn product_logs(
             if acked_peer != peer {
                 return Err("restart census ACK peer differs from witnessed ingress".to_owned());
             }
-            // ADR 0041 / 0047: census command completion ≤ LANDING ACK completion.
-            // Do not use LINE-A action.completed_unix_ms — that includes the ACK
-            // publish wait for LANDING's accept reply and always post-dates ACK.
-            if ack_completed < census_completed {
-                return Err("landing abort ACK predates LINE-A census".to_owned());
-            }
+            // ADR 0041 / 0047 / 0058: order LANDING ACK vs LINE-A census command
+            // time (not LINE-A action completion). Cross-guest clocks may invert
+            // within clock_guard_ms; same-guest send-after-census already holds.
+            action::restart_ack_follows_census(
+                census_completed,
+                ack_completed,
+                contract.clock_guard_ms(),
+            )?;
             let start = ack_completed
                 .checked_add(contract.clock_guard_ms())
                 .ok_or("restart clock guard overflow")?;

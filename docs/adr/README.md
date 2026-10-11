@@ -97,3 +97,4 @@ of the law is what it is.
 | [0055](0055-relocated-openssl-uses-colocated-conf.md) | Relocated OpenSSL uses colocated OPENSSL_CONF | Accepted |
 | [0056](0056-cargo-dev-alias-uses-locked.md) | `cargo dev` alias uses `--locked` | Accepted |
 | [0057](0057-tsan-keeps-current-thread-vision-proofs.md) | ThreadSanitizer stays; Vision accumulation uses current_thread | Accepted |
+| [0058](0058-restart-ack-census-uses-clock-guard.md) | Restart ACK/census ordering uses clock_guard across guests | Accepted |
