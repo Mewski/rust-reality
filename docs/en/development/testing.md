@@ -32,10 +32,13 @@ the validation layers themselves.
   hot-path properties; see [benchmarks.md](../benchmarks.md).
 - **Fuzz targets** (`fuzz/fuzz_targets/`) cover every externally reachable
   parser/decoder/reconstruction path; see [fuzzing.md](fuzzing.md).
-- **Sanitizers** run in CI (Security workflow): Address/LeakSanitizer.
-  Concurrent replay and transport regression tests remain in the ordinary suite.
-  See [ADR 0035](../../adr/0035-remove-thread-sanitizer-gate.md) for the explicit
-  decision to remove ThreadSanitizer and its coverage trade-off.
+- **Sanitizers** run in CI (Security workflow): Address/LeakSanitizer, plus the
+  ThreadSanitizer job required by branch rulesets (replay and warm-transport
+  modules, fail-closed). Non-ignored Vision accumulation proofs use
+  `current_thread` so Tokio multi-thread I/O registration cannot trip the gate
+  as a false positive; see [ADR 0057](../../adr/0057-tsan-keeps-current-thread-vision-proofs.md).
+  ADR 0035's removal is superseded for job presence; its ban on suppression
+  files remains.
 
 ## Actions execution lanes
 

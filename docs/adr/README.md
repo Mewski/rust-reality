@@ -74,7 +74,7 @@ of the law is what it is.
 | [0030](0030-shared-authenticated-session-activity.md) | Shared authenticated session activity | Accepted |
 | [0033](0033-stress-and-virtual-machines-qualify-releases.md) | Stress and isolated QEMU system VMs qualify releases; WAN rollout evidence stays separate | Superseded by ADR 0034 |
 | [0034](0034-qualify-resource-ownership-and-lifetime.md) | Qualify resource ownership and lifetime | Accepted |
-| [0035](0035-remove-thread-sanitizer-gate.md) | Remove the ThreadSanitizer gate | Accepted |
+| [0035](0035-remove-thread-sanitizer-gate.md) | Remove the ThreadSanitizer gate | Superseded by ADR 0057 for job presence |
 | [0036](0036-separate-native-and-qemu-qualification.md) | Separate native and QEMU qualification | Accepted |
 | [0037](0037-bound-descriptor-census-acquisition.md) | Bound descriptor census acquisition | Accepted |
 | [0038](0038-hosted-actions-are-primary-quality-gates.md) | Hosted Actions are the primary quality gates | Accepted |
@@ -96,3 +96,4 @@ of the law is what it is.
 | [0054](0054-frozen-exec-sibling-artifact.md) | Frozen executable sibling artifact | Accepted |
 | [0055](0055-relocated-openssl-uses-colocated-conf.md) | Relocated OpenSSL uses colocated OPENSSL_CONF | Accepted |
 | [0056](0056-cargo-dev-alias-uses-locked.md) | `cargo dev` alias uses `--locked` | Accepted |
+| [0057](0057-tsan-keeps-current-thread-vision-proofs.md) | ThreadSanitizer stays; Vision accumulation uses current_thread | Accepted |

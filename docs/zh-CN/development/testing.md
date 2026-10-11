@@ -22,8 +22,11 @@
   [基准策略](../benchmarks.md)。
 - **模糊测试**位于 `fuzz/fuzz_targets/`，覆盖外部可达解析、解码和重建路径；
   参见[模糊测试指南](../../en/development/fuzzing.md)。
-- **Sanitizer** 由 Security workflow 执行，保留地址/泄漏检查。重放和传输并发回归仍由常规测试覆盖。
-  移除 ThreadSanitizer 的明确取舍见 [ADR 0035](../../adr/0035-remove-thread-sanitizer-gate.md)。
+- **Sanitizer** 由 Security workflow 执行：地址/泄漏检查，以及分支规则集要求的
+  ThreadSanitizer（重放与 warm-transport 相关模块，失败即停）。非 ignore 的
+  Vision 累积证明使用 `current_thread`，避免 Tokio 多线程 I/O 注册误报；见
+  [ADR 0057](../../adr/0057-tsan-keeps-current-thread-vision-proofs.md)。
+  ADR 0035 对移除门禁的决定已被覆盖；其对 suppression 文件的禁令仍然有效。
 
 ## Actions 执行分工
 

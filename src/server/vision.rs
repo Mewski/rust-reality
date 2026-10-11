@@ -4636,7 +4636,12 @@ mod tests {
     /// begins after 190 seconds, and half-close drains after crossing 120
     /// seconds. A blocked pending write must still fail on the production
     /// 120-second stall, not because the opposite direction is quiet.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    ///
+    /// Uses `current_thread` like the other non-ignored Vision proofs: the
+    /// accumulation is sequential, and multi-thread Tokio I/O registration
+    /// trips ThreadSanitizer inside `ScheduledIo` (ADR 0057). Ignored
+    /// multi-thread diagnostics and the 600s matrix keep their flavors.
+    #[tokio::test(flavor = "current_thread")]
     async fn three_downlink_chunks_accumulate() {
         let mut session = open_framed(b"SSE", 0x11).await;
         let mut request = [0; 3];

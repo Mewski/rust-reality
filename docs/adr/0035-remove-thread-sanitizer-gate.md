@@ -1,6 +1,6 @@
 # ADR 0035: Remove the ThreadSanitizer gate
 
-Status: Accepted
+Status: Superseded by ADR 0057 for job presence; suppression ban retained
 
 ## Context
 

@@ -290,7 +290,7 @@ The parser property gate still covers
 every maximum-request prefix plus three byte mutations at every position.
 Local restricted-shell runs disable only LSan's ptrace-unsupported leak
 detector; CI retains leak detection and ordinary replay-duplicate race tests.
-The former ThreadSanitizer gate was removed by ADR 0035; historical failures
+ThreadSanitizer remains the ruleset-required Security job (ADR 0057); historical failures
 remain evidence and are not reclassified as passes.
 
 ## Methodology rules (and the traps that invalidated earlier numbers)
