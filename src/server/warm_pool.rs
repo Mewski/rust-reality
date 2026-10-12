@@ -1412,7 +1412,6 @@ mod tests {
             .expect("cover accept task must not panic")
             .expect("recovered cover must accept");
         assert_eq!(pool.snapshot().ready, 1);
-        assert_eq!(pool.snapshot().ready, 1);
         pool.deactivate();
         drop(accepted);
     }
@@ -1479,21 +1478,28 @@ mod tests {
         drop(listener);
         drop(peer); // process-exit analogue for this accepted socket
 
-        // Deliver FIN to the client; idle_healthy / try_read must see it.
-        time::sleep(Duration::from_millis(50)).await;
+        // Wait for FIN/RST without a fixed sleep race: poll try_read until
+        // closed/reset, or fall back to a write that must fail.
         let mut established = established;
-        let mut buf = [0u8; 8];
-        match established.try_read(&mut buf) {
-            Ok(0) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                let write = established.write_all(b"x").await;
-                assert!(
-                    write.is_err(),
-                    "established write must fail after peer teardown, got {write:?}"
-                );
+        let deadline = time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let mut buf = [0u8; 8];
+            match established.try_read(&mut buf) {
+                Ok(0) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if time::Instant::now() >= deadline {
+                        let write = established.write_all(b"x").await;
+                        assert!(
+                            write.is_err(),
+                            "established write must fail after peer teardown, got {write:?}"
+                        );
+                        break;
+                    }
+                    time::sleep(Duration::from_millis(10)).await;
+                }
+                other => panic!("expected FIN/RST after peer teardown, got {other:?}"),
             }
-            other => panic!("expected FIN/RST after peer teardown, got {other:?}"),
         }
 
         let err = tokio::net::TcpStream::connect(addr)
