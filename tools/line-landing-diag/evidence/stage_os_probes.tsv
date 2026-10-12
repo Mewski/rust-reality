@@ -1,0 +1,7 @@
+scenario	verdict	stage	notes
+landing_not_listening	PASS	S2_line_tcp_connect	
+landing_stop_listen_established_survives	PASS	S2_vs_S9	new ECONNREFUSED while established send may still OK — classic intermittent pattern
+peer_fin	PASS	S4_warm_checkout_stale	
+peer_rst	PASS	S4_warm_first_use	
+silent_blackhole_undetectable_by_try_read	PASS	S4_warm_checkout_stale	GAP: AdaptiveTcpPool.idle_healthy cannot see silent drops without RST/FIN
+accept_queue_pressure	PASS	S3_landing_accept_backlog	On this kernel with tcp_abort_on_overflow=0, overflow tends toward client timeout / SYN drop, NOT ECONNREFUSED. Do not equate backlog pressure with connection_refused without host sysctl evidence.

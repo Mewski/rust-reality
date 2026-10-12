@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s
+     Running unittests src/lib.rs (/workspace/cargo-target-diag/debug/deps/rust_reality-2954d5288a8cec7e)
+
+running 2 tests
+test server::outbound::tests::stale_warm_nxr_socket_is_discarded_before_cold_fallback ... ok
+test server::handoff::tests::stale_warm_handoff_socket_is_discarded_before_cold_fallback ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 863 filtered out; finished in 0.02s
+

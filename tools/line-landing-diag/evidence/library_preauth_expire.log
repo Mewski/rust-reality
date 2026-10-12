@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
+     Running unittests src/lib.rs (/workspace/cargo-target-diag/debug/deps/rust_reality-2954d5288a8cec7e)
+
+running 1 test
+test server::handoff::tests::unused_handoff_socket_expires_at_pre_auth_idle_deadline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 864 filtered out; finished in 0.00s
+
