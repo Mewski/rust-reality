@@ -14,6 +14,16 @@ pub enum FailureStage {
     HandoffFirstDownlink,
     /// LINE relayed a transferred session's ciphertext.
     HandoffRelay,
+    /// LANDING accepted a socket but had not yet authenticated the peer.
+    ///
+    /// Covers pre-auth idle admission, pressure reclaim, descriptor budget at
+    /// the LANDING listener, and the pre-auth idle wait timeout. Quiet warm
+    /// peer-close / generation retirement stay unprojected (`detail` is
+    /// `None`) because they are ordinary lifecycle, not rejections.
+    LandingPreAuth,
+    /// LANDING authenticated a Handoff/NXR transfer (protocol, replay, clock,
+    /// allocation, or auth-body read) before destination dial.
+    LandingAuthenticate,
     /// LANDING connected the authenticated destination.
     LandingDestination,
     /// LANDING connected its explicitly configured egress.

@@ -296,10 +296,15 @@ sudo journalctl -u rust-reality -o cat | jq -c 'select(.level != "info")'
 
 认证后的出站失败还可以包含 `failure` 对象，提供固定词表的 `stage`、`cause`
 和可选的数字 `errno`。例如，`landing_destination` + `connection_refused` 表示
-LANDING 连接目标时被拒绝；`handoff_first_downlink` + `landing_rejected` 表示 LINE
-未收到有效的恢复会话 TLS 首字节。仅凭后者**无法**区分静默认证拒绝、目标连接失败
-或网络丢包。应结合两端时间戳排查，不要把两条不相关的 `outbound` 日志当成同一根因。
-这些字段不包含目标域名、出站标签、凭据、载荷或操作系统错误原文。
+LANDING 连接目标时被拒绝；`handoff_transfer` / `outbound_connect` +
+`connection_refused`（含 errno）表示 LINE 冷拨号被操作系统拒绝（常见于 LANDING
+未监听或重启窗口——已有长连接仍可能正常）；`landing_pre_auth` 覆盖 LANDING
+准入、回收、描述符预算以及认证前的 pre-auth idle 超时；`landing_authenticate`
+覆盖 Handoff/NXR 传输协议、重放、时钟、分配以及认证报文读失败；
+`handoff_first_downlink` + `landing_rejected` 表示 LINE 未收到有效的恢复会话 TLS
+首字节。仅凭后者**无法**区分静默认证拒绝、目标连接失败或网络丢包。应结合两端
+时间戳排查，不要把两条不相关的 `outbound` 日志当成同一根因。这些字段不包含目标
+域名、出站标签、凭据、载荷或操作系统错误原文。
 
 LANDING 内嵌的 egress 准入/描述符失败仍归类为 `resource_limit`，会话/连接超时
 归类为 `timeout`。配置的 egress 发生准入拒绝时，还会输出已有的

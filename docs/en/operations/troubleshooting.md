@@ -318,9 +318,15 @@ node is ordinary background noise — it is what a scanner produces.
 Authenticated outbound failures can also carry a `failure` object with fixed
 `stage`, `cause`, and optional numeric `errno` fields. For example,
 `landing_destination` + `connection_refused` identifies a refused destination
-dial on LANDING; `handoff_first_downlink` + `landing_rejected` means LINE did not
-receive a valid resumed TLS byte. The latter alone does **not** distinguish a
-silent authentication rejection, destination failure, or lost network traffic.
+dial on LANDING; `handoff_transfer` / `outbound_connect` + `connection_refused`
+with errno identifies a LINE cold dial that the OS refused (often LANDING not
+listening or restarting — existing sessions may still work); `landing_pre_auth`
+covers LANDING admission, reclaim, descriptor budget, and pre-auth idle timeout
+before authentication; `landing_authenticate` covers Handoff/NXR transfer
+protocol, replay, clock, allocation, and auth-body read failures;
+`handoff_first_downlink` + `landing_rejected` means LINE did not receive a valid
+resumed TLS byte. The latter alone does **not** distinguish a silent
+authentication rejection, destination failure, or lost network traffic.
 Correlate both nodes' timestamps; do not infer a shared cause from two unrelated
 `outbound` lines. The projection never includes destination names, outbound
 tags, credentials, payloads, or raw OS error messages.
