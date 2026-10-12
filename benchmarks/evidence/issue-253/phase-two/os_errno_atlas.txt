@@ -1,0 +1,11 @@
+S2_line_tcp_connect_nothing_listens	111	ECONNREFUSED	ConnectionRefusedError	[Errno 111] Connection refused
+S4_warm_idle_peer_fin	readable	b''	idle_healthy→False	stale_discard path
+S4_warm_idle_peer_rst_recv	104	ECONNRESET	ConnectionResetError	[Errno 104] Connection reset by peer
+S4_warm_first_write_after_rst	32	EPIPE	BrokenPipeError	[Errno 32] Broken pipe
+S4_silent_blackhole_idle_probe	EAGAIN/WouldBlock	idle_healthy→True	GAP: undetectable until first write	
+S9_established_after_listen_close_send	OK		existing flow may continue	
+S2_new_connect_after_listen_close	111	ECONNREFUSED	ConnectionRefusedError	[Errno 111] Connection refused
+S3_backlog_pressure_extra	None	?	TimeoutError	timed out	fillers=64
+---
+tcp_abort_on_overflow 0
+somaxconn 4096

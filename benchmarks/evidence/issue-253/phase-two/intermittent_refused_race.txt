@@ -1,0 +1,10 @@
+SCENARIO: landing_listen_flap_race
+RESULT: PASS (intermittent ECONNREFUSED reproduced on localhost)
+hypothesis: LANDING restart/not-listening window while ESTABLISHED may continue
+  connect_ECONNREFUSED=236
+  connect_ETIMEDOUT=4
+  connect_ok=360
+  established_send_ok=4
+  post_connect_send_ok=360
+  connect_total≈600 refused_ratio=236/600
+VERDICT: PASS — mixed OK + ECONNREFUSED under restart flap

@@ -1,0 +1,36 @@
+== stage OS probes ==
+/workspace/rust-reality-diag/tools/line-landing-diag/evidence/stage_os_probes.json
+scenario	verdict	stage	notes
+landing_not_listening	PASS	S2_line_tcp_connect	
+landing_stop_listen_established_survives	PASS	S2_vs_S9	new ECONNREFUSED while established send may still OK — classic intermittent pattern
+peer_fin	PASS	S4_warm_checkout_stale	
+peer_rst	PASS	S4_warm_first_use	
+silent_blackhole_undetectable_by_try_read	PASS	S4_warm_checkout_stale	GAP: AdaptiveTcpPool.idle_healthy cannot see silent drops without RST/FIN
+accept_queue_pressure	PASS	S3_landing_accept_backlog	On this kernel with tcp_abort_on_overflow=0, overflow tends toward client timeout / SYN drop, NOT ECONNREFUSED. Do not equate backlog pressure with connection_refused without host sysctl evidence.
+== intermittent refused race ==
+{
+  "scenario": "landing_listen_flap_race",
+  "verdict": "PASS",
+  "hypothesis": "LANDING restart/not-listening window while ESTABLISHED may continue",
+  "issue": 253,
+  "stats": {
+    "connect_ok": 324,
+    "post_connect_send_ok": 324,
+    "connect_ECONNREFUSED": 276,
+    "established_send_ok": 4
+  },
+  "connect_total": 600,
+  "refused_ratio": "276/600"
+}
+== library evidence ==
+filter	verdict	passed	failed
+stale_warm	PASS	2	0
+checkout_discards	PASS	1	0
+a_failed_dial	PASS	1	0
+landing_errno	PASS	1	0
+pressure_reclaims	PASS	2	0
+zero_byte_peer	PASS	1	0
+warm_nxr_sends	PASS	1	0
+idle_admission_limit	PASS	1	0
+unused_handoff_socket_expires	PASS	1	0
+== done; see /workspace/rust-reality-diag/tools/line-landing-diag/evidence ==
