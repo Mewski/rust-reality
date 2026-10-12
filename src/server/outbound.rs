@@ -400,6 +400,33 @@ impl OutboundRegistry {
             .filter_map(CompiledOutbound::warm_pool_snapshot)
             .collect()
     }
+
+    /// Visits each warm outbound pool without allocating an intermediate vector.
+    ///
+    /// Callers that need only aggregates (telemetry) use this path so sampling
+    /// stays allocation-free on the observer hot path. Order is unspecified.
+    pub(crate) fn visit_warm_pool_snapshots(
+        &self,
+        mut visitor: impl FnMut(OutboundWarmPoolSnapshot),
+    ) {
+        let mut visit = |outbound: &CompiledOutbound| {
+            if let Some(snapshot) = outbound.warm_pool_snapshot() {
+                visitor(snapshot);
+            }
+        };
+        match self.outbounds.as_ref() {
+            OutboundIndex::Sorted(entries) => {
+                for (_, outbound) in entries {
+                    visit(outbound);
+                }
+            }
+            OutboundIndex::Hashed(entries) => {
+                for outbound in entries.values() {
+                    visit(outbound);
+                }
+            }
+        }
+    }
 }
 
 impl fmt::Debug for OutboundRegistry {
@@ -474,9 +501,9 @@ impl CompiledOutbound {
 
     fn warm_pool_snapshot(&self) -> Option<OutboundWarmPoolSnapshot> {
         let transport = match self {
-            Self::Socks5(_) => "socks5",
-            Self::Nxr(Some(_)) => "nxr",
-            Self::Handoff(Some(_)) => "handoff",
+            Self::Socks5(_) => WarmOutboundKind::Socks5,
+            Self::Nxr(Some(_)) => WarmOutboundKind::Nxr,
+            Self::Handoff(Some(_)) => WarmOutboundKind::Handoff,
             Self::Direct | Self::Block | Self::Nxr(None) | Self::Handoff(None) => {
                 return None;
             }
@@ -488,8 +515,25 @@ impl CompiledOutbound {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum WarmOutboundKind {
+    Handoff,
+    Nxr,
+    Socks5,
+}
+
+impl WarmOutboundKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Handoff => "handoff",
+            Self::Nxr => "nxr",
+            Self::Socks5 => "socks5",
+        }
+    }
+}
+
 pub(crate) struct OutboundWarmPoolSnapshot {
-    pub(crate) transport: &'static str,
+    pub(crate) transport: WarmOutboundKind,
     pub(crate) pool: WarmPoolSnapshot,
 }
 
