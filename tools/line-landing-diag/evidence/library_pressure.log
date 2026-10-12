@@ -1,9 +1,0 @@
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
-     Running unittests src/lib.rs (/workspace/cargo-target-diag/debug/deps/rust_reality-2954d5288a8cec7e)
-
-running 2 tests
-test server::warm_pool::tests::pressure_reclaims_ready_state_before_checked_out_sessions ... ok
-test server::warm_pool::tests::fd_pressure_reclaims_ready_permits_and_recovers ... ok
-
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 863 filtered out; finished in 0.11s
-
