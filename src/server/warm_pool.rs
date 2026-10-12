@@ -1412,7 +1412,93 @@ mod tests {
             .expect("cover accept task must not panic")
             .expect("recovered cover must accept");
         assert_eq!(pool.snapshot().ready, 1);
+        assert_eq!(pool.snapshot().ready, 1);
         pool.deactivate();
         drop(accepted);
+    }
+
+    /// M1 — Listener unavailable while established sessions survive.
+    ///
+    /// Closing only the listening socket (process still "alive", accepted FD
+    /// retained) refuses NEW dials with ECONNREFUSED while an already-accepted
+    /// session can still exchange bytes. This is the OS-level shape behind
+    /// hypothesis H1 / #253 "new fail, old may work", and discriminates from
+    /// full peer teardown (see sibling test).
+    #[tokio::test]
+    async fn listen_unavailable_established_survives_new_dials_refuse() {
+        use tokio::io::AsyncReadExt;
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("listener must bind");
+        let addr = listener.local_addr().expect("listener address");
+        let mut established = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("established dial");
+        let (mut peer, _) = listener.accept().await.expect("accept established");
+        // Drop listen only — analogue of bind flap / stop-listen without exit.
+        drop(listener);
+
+        established
+            .write_all(b"ping")
+            .await
+            .expect("established write must succeed while peer FD lives");
+        let mut buf = [0u8; 4];
+        peer.read_exact(&mut buf)
+            .await
+            .expect("peer must still receive");
+        assert_eq!(&buf, b"ping");
+
+        let err = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect_err("new dial must be refused while listener is down");
+        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionRefused);
+        assert_eq!(
+            err.raw_os_error(),
+            Some(111),
+            "Linux ECONNREFUSED errno must be 111"
+        );
+    }
+
+    /// M2 — Full peer teardown (process-restart analogue) kills established.
+    ///
+    /// Dropping the accepted peer FD (as process exit closes all FDs) makes
+    /// the established side observe FIN/RST; new dials also refuse while the
+    /// endpoint is down. Operators: if established sessions ALSO die when new
+    /// dials refuse, prefer M2 (restart/crash) over M1 (listen-only flap).
+    #[tokio::test]
+    async fn peer_teardown_terminates_established_and_new_dials_refuse() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("listener must bind");
+        let addr = listener.local_addr().expect("listener address");
+        let established = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("established dial");
+        let (peer, _) = listener.accept().await.expect("accept established");
+        drop(listener);
+        drop(peer); // process-exit analogue for this accepted socket
+
+        // Deliver FIN to the client; idle_healthy / try_read must see it.
+        time::sleep(Duration::from_millis(50)).await;
+        let mut established = established;
+        let mut buf = [0u8; 8];
+        match established.try_read(&mut buf) {
+            Ok(0) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                let write = established.write_all(b"x").await;
+                assert!(
+                    write.is_err(),
+                    "established write must fail after peer teardown, got {write:?}"
+                );
+            }
+            other => panic!("expected FIN/RST after peer teardown, got {other:?}"),
+        }
+
+        let err = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect_err("new dial must be refused while endpoint is down");
+        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionRefused);
     }
 }
