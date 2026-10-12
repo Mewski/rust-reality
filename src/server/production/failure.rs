@@ -46,6 +46,36 @@ pub(super) fn detail(error: &ConnectionRunError) -> Option<FailureDetail> {
         | ConnectionRunError::Vision(
             VisionSessionError::Relay(error) | VisionSessionError::Io(error),
         ) => (Stage::SessionRelay, io_cause(error)),
+        // LANDING pre-auth: socket accepted, peer not yet authenticated.
+        ConnectionRunError::Handoff(
+            HandoffLandingError::Admission(_)
+            | HandoffLandingError::Reclaimed
+            | HandoffLandingError::DescriptorBudget
+            | HandoffLandingError::Timeout,
+        )
+        | ConnectionRunError::Nxr(
+            NxrLandingError::Admission(_)
+            | NxrLandingError::Reclaimed
+            | NxrLandingError::DescriptorBudget
+            | NxrLandingError::Timeout,
+        ) => (Stage::LandingPreAuth, landing_pre_auth(error)),
+        // LANDING authenticate: transfer/request body before destination dial.
+        ConnectionRunError::Handoff(
+            HandoffLandingError::Protocol(_)
+            | HandoffLandingError::Read(_)
+            | HandoffLandingError::Allocation
+            | HandoffLandingError::Clock,
+        )
+        | ConnectionRunError::Nxr(
+            NxrLandingError::Protocol(_)
+            | NxrLandingError::Authentication(_)
+            | NxrLandingError::Read(_)
+            | NxrLandingError::Allocation
+            | NxrLandingError::Clock,
+        ) => (Stage::LandingAuthenticate, landing_authenticate(error)),
+        // Quiet pre-auth peer-close / generation retirement intentionally stay
+        // unprojected; Reality accept remains out of this projection until a
+        // dedicated public-node stage is defined.
         _ => return None,
     };
     Some(FailureDetail {
@@ -53,6 +83,38 @@ pub(super) fn detail(error: &ConnectionRunError) -> Option<FailureDetail> {
         cause,
         errno,
     })
+}
+
+fn landing_pre_auth(error: &ConnectionRunError) -> CauseAndErrno {
+    match error {
+        ConnectionRunError::Handoff(HandoffLandingError::Admission(_))
+        | ConnectionRunError::Nxr(NxrLandingError::Admission(_))
+        | ConnectionRunError::Handoff(HandoffLandingError::Reclaimed)
+        | ConnectionRunError::Nxr(NxrLandingError::Reclaimed) => (Cause::Admission, None),
+        ConnectionRunError::Handoff(HandoffLandingError::DescriptorBudget)
+        | ConnectionRunError::Nxr(NxrLandingError::DescriptorBudget) => {
+            (Cause::DescriptorBudget, None)
+        }
+        ConnectionRunError::Handoff(HandoffLandingError::Timeout)
+        | ConnectionRunError::Nxr(NxrLandingError::Timeout) => (Cause::Timeout, None),
+        _ => (Cause::Internal, None),
+    }
+}
+
+fn landing_authenticate(error: &ConnectionRunError) -> CauseAndErrno {
+    match error {
+        ConnectionRunError::Handoff(HandoffLandingError::Read(error))
+        | ConnectionRunError::Nxr(NxrLandingError::Read(error)) => io_cause(error),
+        ConnectionRunError::Handoff(HandoffLandingError::Allocation)
+        | ConnectionRunError::Nxr(NxrLandingError::Allocation) => (Cause::Allocation, None),
+        ConnectionRunError::Handoff(HandoffLandingError::Clock)
+        | ConnectionRunError::Nxr(NxrLandingError::Clock) => (Cause::Clock, None),
+        ConnectionRunError::Handoff(HandoffLandingError::Protocol(_))
+        | ConnectionRunError::Nxr(
+            NxrLandingError::Protocol(_) | NxrLandingError::Authentication(_),
+        ) => (Cause::Protocol, None),
+        _ => (Cause::Internal, None),
+    }
 }
 
 pub(super) fn io_cause(error: &io::Error) -> CauseAndErrno {
@@ -348,6 +410,173 @@ mod tests {
                 cause: Cause::LandingRejected,
                 errno: None,
             })
+        );
+    }
+
+    /// Phase 2 gap: LANDING pre-auth / auth used to return `detail=None`, so
+    /// operators only saw coarse `reason=authentication|resource_limit|timeout`
+    /// and could not tell pre-auth idle from transfer auth from destination.
+    #[test]
+    fn landing_pre_auth_and_authenticate_are_not_lumped_as_outbound() {
+        use crate::protocol::handoff::HandoffError;
+        use crate::protocol::nxr::NxrProtocolError;
+        use crate::runtime::{AdmissionDenied, AdmissionKind};
+        use crate::server::nxr::NxrAuthenticationError;
+
+        let cases: &[(ConnectionRunError, Stage, Cause, Option<i32>)] = &[
+            (
+                ConnectionRunError::Handoff(HandoffLandingError::Admission(
+                    AdmissionDenied::Limit(AdmissionKind::PreAuthIdle),
+                )),
+                Stage::LandingPreAuth,
+                Cause::Admission,
+                None,
+            ),
+            (
+                ConnectionRunError::Nxr(NxrLandingError::Reclaimed),
+                Stage::LandingPreAuth,
+                Cause::Admission,
+                None,
+            ),
+            (
+                ConnectionRunError::Handoff(HandoffLandingError::DescriptorBudget),
+                Stage::LandingPreAuth,
+                Cause::DescriptorBudget,
+                None,
+            ),
+            (
+                ConnectionRunError::Nxr(NxrLandingError::Timeout),
+                Stage::LandingPreAuth,
+                Cause::Timeout,
+                None,
+            ),
+            (
+                ConnectionRunError::Handoff(HandoffLandingError::Protocol(
+                    HandoffError::Authentication,
+                )),
+                Stage::LandingAuthenticate,
+                Cause::Protocol,
+                None,
+            ),
+            (
+                ConnectionRunError::Nxr(NxrLandingError::Authentication(
+                    NxrAuthenticationError::Protocol(NxrProtocolError::Authentication),
+                )),
+                Stage::LandingAuthenticate,
+                Cause::Protocol,
+                None,
+            ),
+            (
+                ConnectionRunError::Handoff(HandoffLandingError::Read(
+                    io::Error::from_raw_os_error(104),
+                )),
+                Stage::LandingAuthenticate,
+                Cause::ConnectionReset,
+                Some(104),
+            ),
+            (
+                ConnectionRunError::Nxr(NxrLandingError::Allocation),
+                Stage::LandingAuthenticate,
+                Cause::Allocation,
+                None,
+            ),
+            (
+                ConnectionRunError::Handoff(HandoffLandingError::Clock),
+                Stage::LandingAuthenticate,
+                Cause::Clock,
+                None,
+            ),
+        ];
+        for (error, stage, cause, errno) in cases {
+            assert_eq!(
+                detail(error),
+                Some(FailureDetail {
+                    stage: *stage,
+                    cause: *cause,
+                    errno: *errno,
+                }),
+                "expected typed stage for {error:?}"
+            );
+            // Must not look like a destination / LINE outbound dial failure.
+            assert_ne!(stage, &Stage::LandingDestination);
+            assert_ne!(stage, &Stage::OutboundConnect);
+            assert_ne!(stage, &Stage::LandingEgress);
+            let json = serde_json::to_string(&detail(error).expect("detail")).expect("json");
+            assert!(!json.contains("PRIVATE"));
+            assert!(!json.contains("destination"));
+        }
+    }
+
+    /// Quiet pre-auth peer-close / generation retirement must stay unprojected
+    /// so ordinary warm lifecycle does not become rejection noise.
+    #[test]
+    fn quiet_pre_auth_retirement_stays_without_failure_detail() {
+        for error in [
+            ConnectionRunError::Handoff(HandoffLandingError::PreAuthPeerClosed),
+            ConnectionRunError::Handoff(HandoffLandingError::PreAuthGenerationRetired),
+            ConnectionRunError::Nxr(NxrLandingError::PreAuthPeerClosed),
+            ConnectionRunError::Nxr(NxrLandingError::PreAuthGenerationRetired),
+        ] {
+            assert!(error.is_quiet_pre_auth_retirement());
+            assert_eq!(detail(&error), None);
+        }
+    }
+
+    /// Phase 2 H1: LINE cold dial after listen-down must surface ECONNREFUSED
+    /// with errno on both Handoff and NXR LINE paths (not only LANDING egress).
+    #[test]
+    fn line_cold_dial_connection_refused_keeps_errno_and_stage() {
+        let refused = io::Error::from_raw_os_error(111);
+        assert_eq!(refused.kind(), io::ErrorKind::ConnectionRefused);
+        assert_eq!(refused.raw_os_error(), Some(111));
+
+        let handoff = ConnectionRunError::Vision(VisionSessionError::HandoffLine(
+            HandoffLineError::Connect(io::Error::from_raw_os_error(111)),
+        ));
+        assert_eq!(
+            detail(&handoff),
+            Some(FailureDetail {
+                stage: Stage::HandoffTransfer,
+                cause: Cause::ConnectionRefused,
+                errno: Some(111),
+            })
+        );
+        assert_eq!(handoff.rejection_reason(), RejectionReason::Outbound);
+
+        let nxr = ConnectionRunError::Vision(VisionSessionError::Outbound(
+            OutboundConnectError::NxrConnect(io::Error::from_raw_os_error(111)),
+        ));
+        assert_eq!(
+            detail(&nxr),
+            Some(FailureDetail {
+                stage: Stage::OutboundConnect,
+                cause: Cause::ConnectionRefused,
+                errno: Some(111),
+            })
+        );
+        assert_eq!(nxr.rejection_reason(), RejectionReason::Outbound);
+
+        // DestinationConnectError::Io → into_io preserves errno on Handoff connect.
+        let wrapped = DestinationConnectError::Io(io::Error::from_raw_os_error(111)).into_io();
+        let via_into_io = ConnectionRunError::Vision(VisionSessionError::HandoffLine(
+            HandoffLineError::Connect(wrapped),
+        ));
+        assert_eq!(
+            detail(&via_into_io),
+            Some(FailureDetail {
+                stage: Stage::HandoffTransfer,
+                cause: Cause::ConnectionRefused,
+                errno: Some(111),
+            })
+        );
+
+        // Distinct from LANDING destination refuse (same errno, different stage).
+        let landing = ConnectionRunError::Handoff(HandoffLandingError::Destination(
+            DestinationConnectError::Io(io::Error::from_raw_os_error(111)),
+        ));
+        assert_eq!(
+            detail(&landing).expect("landing").stage,
+            Stage::LandingDestination
         );
     }
 }
