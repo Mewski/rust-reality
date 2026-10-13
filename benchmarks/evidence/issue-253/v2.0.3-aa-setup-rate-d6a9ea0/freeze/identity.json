@@ -1,0 +1,9 @@
+{
+  "sourceCommit": "d6a9ea0b0b646f426a89b83ecb7537a13f8fea1c",
+  "binarySha256": "257d71fd9318090885a720f718306ac24e97a9079226088542cd79bf651d63e8",
+  "sha256sumsVerified": true,
+  "gnuBuildId": "6302ae650e09071c8fc26d5720c324c39ec0e8e7",
+  "bytes": 7627192,
+  "provenance": "cargo dev perf freeze --commit d6a9ea0b0b646f426a89b83ecb7537a13f8fea1c (this host)",
+  "freezeJson": "/workspace/evidence-v203-aa/freeze-d6a9ea0/freeze.json"
+}

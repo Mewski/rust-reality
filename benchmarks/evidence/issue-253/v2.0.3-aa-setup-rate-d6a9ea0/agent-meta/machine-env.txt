@@ -1,0 +1,29 @@
+date_pt=2026-10-12T19:05:53-07:00
+hostname=grok-bot-vm-446725139
+uname=Linux grok-bot-vm-446725139 6.12.94+ #1 SMP PREEMPT_DYNAMIC Thu Oct  8 05:28:00 UTC 2026 x86_64 GNU/Linux
+nproc=8
+CPU(s):                                  8
+Model name:                              Intel(R) Xeon(R) Processor
+Thread(s) per core:                      1
+Core(s) per socket:                      8
+Flags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush dts mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc pebs bts rep_good nopl xtopology nonstop_tsc cpuid tsc_known_freq pni pclmulqdq dtes64 vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch cpuid_fault ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow flexpriority ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves avx_vnni avx512_bf16 wbnoinvd arat vnmi avx512vbmi umip pku ospke avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq rdpid bus_lock_detect cldemote movdiri movdir64b fsrm md_clear serialize tsxldtrk amx_bf16 avx512_fp16 amx_tile amx_int8 flush_l1d arch_capabilities
+Hypervisor vendor:                       KVM
+NUMA node0 CPU(s):                       0-7
+mem_available_kb=7743864
+rustc=rustc 1.96.0 (ac68faa20 2026-05-25)
+elf=/workspace/evidence-v203-aa/freeze-d6a9ea0/binary/rust-reality
+elf_sha256=257d71fd9318090885a720f718306ac24e97a9079226088542cd79bf651d63e8
+elf_build_id=6302ae650e09071c8fc26d5720c324c39ec0e8e7
+commit=d6a9ea0b0b646f426a89b83ecb7537a13f8fea1c
+xray=/workspace/evidence-v203-aa/xray-v26.9.9/xray-with-buildid
+xray_upstream_zip_sha256=1eb9175d0f0a8f8149c9230a7fc5ae66ce332ed20a53155ce61fe62e3f58b7df
+xray_upstream_elf_sha256=c4ae6798c38e0e5343b192406746333cd0ba7ff3eb984f8c4b9939dcb68c3f8a
+xray_with_buildid_sha256=19b36f91263342a6fcd47df567b23f0629a01fb154e71a84e78a966abba16168
+xray_build_id=c4ae6798c38e0e5343b192406746333cd0ba7ff3
+xray_note=stock Xray-linux-64 v26.9.9 has 0 GNU Build IDs; injected NT_GNU_BUILD_ID=sha256(upstream)[:20] for harness attest only (SOCKS client, not under test)
+measure_mode=schedstat
+suite=setup-rate
+blocks=12
+run_kind=control (same-binary A/A)
+baseline_bin=rust_bin (identical freeze ELF)
+command=cargo dev bench run --suite setup-rate --blocks 12 --measure-mode schedstat --baseline-bin ELF --baseline-identity SIDECAR --baseline-commit COMMIT --rust-bin ELF --xray-bin XRAY --out-dir OUT

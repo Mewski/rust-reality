@@ -1,0 +1,17 @@
+{
+  "binary": {
+    "buildId": "6302ae650e09071c8fc26d5720c324c39ec0e8e7",
+    "path": "/workspace/evidence-v203-aa/freeze-d6a9ea0/binary/rust-reality",
+    "sha256": "257d71fd9318090885a720f718306ac24e97a9079226088542cd79bf651d63e8"
+  },
+  "block": 1,
+  "implementation": "baseline",
+  "ports": {
+    "server": 61002,
+    "socks": 61003
+  },
+  "position": 1,
+  "process": {
+    "serverPid": 1060788
+  }
+}

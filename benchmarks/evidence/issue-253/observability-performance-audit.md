@@ -89,9 +89,9 @@ Introduced with `#281`: timeout/resource/policy/io live inside `PoolState` (`war
 
 ---
 
-## 6. Planned measurement commands (not executed this turn)
+## 6. Measurement commands (A/A executed 2026-10-12 PT)
 
-Environment: this executor box may lack host lock / `perf` / KVM. Commands are **contracts**, not claimed results.
+Host lock: available. `perf`: absent → use `schedstat`. A/A results: [`v2.0.3-aa-setup-rate-d6a9ea0/`](./v2.0.3-aa-setup-rate-d6a9ea0/).
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -99,8 +99,9 @@ export RUSTUP_TOOLCHAIN=1.96.0
 export CARGO_TARGET_DIR=/workspace/cargo-target-v203
 cd /path/to/rust-reality   # at d6a9ea0
 
-# Identity-bound freeze (baseline = candidate for A/A)
-cargo dev perf freeze --commit d6a9ea0b0b646f426a89b83ecb7537a13f8fea1c
+# Identity-bound freeze (baseline = candidate for A/A); --out-dir required, absolute, must not exist
+cargo dev perf freeze --commit d6a9ea0b0b646f426a89b83ecb7537a13f8fea1c \
+  --out-dir /abs/path/freeze-d6a9ea0
 
 # Same-binary A/A (runKind=control expected in archive)
 cargo dev bench run --suite setup-rate \
@@ -132,8 +133,8 @@ Criterion benches under `benches/` (vless_decode, vision, relay_backends, …) d
 | Question | Answer |
 | --- | --- |
 | Hot-path telemetry violation? | **No** (code review) |
-| Worth product change now? | **No** — keep-as-is |
+| Worth product change now? | **No** — keep-as-is (A/A PASS; Observed **NOT_RUN**) |
 | Candidate micro-change if measured hot? | Shorten `snapshot` lock (copy then drop) |
 | RC impact of this PR | Docs/evidence only; Frozen tip unchanged |
 
-**Evidence tier:** code-review conclusions = review PASS for design invariants; performance claim of “no regression from observer” for setup-rate under load = **NOT_RUN** until paired cells exist.
+**Evidence tier:** code-review conclusions = review PASS for design invariants; same-binary A/A setup-rate = **PASS** (control). Observer Idle vs Observed under load = **NOT_RUN**.
