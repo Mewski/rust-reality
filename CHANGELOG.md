@@ -4,6 +4,23 @@ All notable user-facing changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Authenticated TLS 1.3 application sessions now process peer KeyUpdate messages
+  and rotate traffic keys before their confidentiality limits.
+
+### Changed
+
+- Handoff continuation state is now version 2 so current traffic secrets and a
+  pending KeyUpdate response survive transfer. Upgrade LINE and LANDING
+  together; mixed continuation-state versions reject Handoff.
+
+### Fixed
+
+- Incomplete TLS record writes permanently invalidate the write direction.
+  Cancellation, socket errors, and timeouts cannot replay ambiguous ciphertext
+  or export it as valid Handoff state.
+
 ## [2.0.2] - 2026-10-11
 
 Stability qualification, RTT/loss fault coherence, and dependency maintenance.

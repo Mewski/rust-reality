@@ -90,12 +90,12 @@ destination. They differ in what crosses the hop between them:
 
 | | `nxr` | `handoff` |
 | --- | --- | --- |
-| what crosses the hop | the destination and the plaintext stream, re-authenticated | the client's TLS session, still sealed |
-| the landing can read the traffic | yes | no |
-| entry-side state after transfer | relays for the connection's life | none — the session is handed over |
+| what crosses the hop | the destination and the plaintext stream, re-authenticated | sealed continuation, then client TLS ciphertext |
+| the landing can read the traffic | yes | yes, using transferred session keys |
+| entry-side state after transfer | plaintext relay for the connection's life | raw ciphertext relay, no TLS/Vision state |
 
-Choose `nxr` when the landing is yours and simplicity matters. Choose
-`handoff` when the landing should not be able to read what it forwards.
+Choose `nxr` for simpler session ownership. Choose `handoff` to move per-byte
+TLS/Vision work to the landing. Both require a landing trusted with content.
 [Line and landing nodes](line-landing.md) and [Handoff](handoff.md) cover each
 in full; this page covers the fields.
 

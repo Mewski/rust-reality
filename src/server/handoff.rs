@@ -34,10 +34,7 @@ use crate::{
             ContinuationState, HEADER_LEN, HandoffError, HandoffLandingKeys, HandoffPsk,
             HandoffReplayCache, message_len_from_header, open_transfer, seal_transfer,
         },
-        reality::tls13::{
-            EstablishedTls, ExportedRecordState, ExportedTlsState, TrafficKeys,
-            resume_application_halves,
-        },
+        reality::tls13::{EstablishedTls, ExportedTlsState, resume_application_halves},
         vless::UserId,
     },
     runtime::{AdmissionDenied, PressureGauge, ResourceGovernor},
@@ -520,10 +517,10 @@ impl HandoffLandingHandler {
     /// Authentication failures return without writing a response and occur
     /// before destination DNS or connect. On success the transferred pending
     /// ciphertext is fed to the resumed record layer first, the prefetched
-    /// payload enters a fresh Vision decoder first, and the response header
-    /// plus opening Vision frame is the first client-visible server record,
-    /// sealed at the transferred sequence zero or one — the exact ordering
-    /// the session boundary requires.
+    /// payload enters a fresh Vision decoder first, and the first downlink is
+    /// either an owed KeyUpdate response or the response header plus opening
+    /// Vision frame. It is sealed at the exact transferred generation and
+    /// sequence zero or one.
     ///
     /// # Errors
     ///
@@ -557,18 +554,16 @@ impl HandoffLandingHandler {
         .map_err(HandoffLandingError::Protocol)?;
         // The wire message's only consumer is `open_transfer`.
         drop(message);
-        let state = opened.state();
-        // Reconstruct and validate the TLS state before touching the network:
-        // a blob that cannot resume must not cost a destination connection.
-        let tls = resume_tls(state)?;
-        let user_id = UserId::new(*state.user_id());
-        let destination = state.destination().clone();
-        let pending = state.pending_ciphertext().to_vec();
-        let prefetched = state.prefetched_plaintext().to_vec();
-        // The transferred key material lives on inside the resumed record
-        // layers only; the continuation copies are zeroized here, before the
-        // whole-session relay below.
-        drop(opened);
+        let state = opened.into_state();
+        // Move both generation secrets into TLS state before touching the
+        // network: a blob that cannot resume must not cost a destination
+        // connection, and no duplicate secret representation survives.
+        let (exported_tls, user_id, destination, pending, prefetched, key_update_response_pending) =
+            state.into_parts().map_err(HandoffLandingError::Protocol)?;
+        let tls = resume_tls(exported_tls)?;
+        let user_id = UserId::new(user_id);
+        // Authentication state no longer owns session material once the
+        // continuation has been consumed into these move-only parts.
         drop(authentication);
         // The descriptor unit is reserved before connect(2) and outlives the
         // relay: the outbound socket closes before its unit is released. Both
@@ -607,8 +602,13 @@ impl HandoffLandingHandler {
             }
         };
         let (reader_half, writer_half) = inbound.into_split();
-        let (client_reader, client_writer) =
-            resume_application_halves(reader_half, pending, writer_half, tls);
+        let (client_reader, client_writer) = resume_application_halves(
+            reader_half,
+            pending,
+            writer_half,
+            tls,
+            key_update_response_pending,
+        );
         let stats = run_resumed_session(
             client_reader,
             client_writer,
@@ -642,22 +642,8 @@ fn decode_key(key: &SecretString) -> Result<[u8; 32], HandoffLandingConfigError>
 }
 
 /// Rebuilds the session's TLS application state from a verified transfer.
-///
-/// The key material is copied once into freshly zeroizing structures; the
-/// transferred state is zeroized when the caller drops it.
-fn resume_tls(state: &ContinuationState) -> Result<EstablishedTls, HandoffLandingError> {
-    let suite = state.suite();
-    let client_traffic =
-        TrafficKeys::from_raw_parts(state.client_traffic().key(), *state.client_traffic().iv())
-            .map_err(|_| HandoffLandingError::Protocol(HandoffError::State))?;
-    let server_traffic =
-        TrafficKeys::from_raw_parts(state.server_traffic().key(), *state.server_traffic().iv())
-            .map_err(|_| HandoffLandingError::Protocol(HandoffError::State))?;
-    let client = ExportedRecordState::from_parts(suite, client_traffic, state.client_sequence())
-        .map_err(|_| HandoffLandingError::Protocol(HandoffError::State))?;
-    let server = ExportedRecordState::from_parts(suite, server_traffic, state.server_sequence())
-        .map_err(|_| HandoffLandingError::Protocol(HandoffError::State))?;
-    EstablishedTls::from_exported_state(ExportedTlsState::from_directions(client, server))
+fn resume_tls(state: ExportedTlsState) -> Result<EstablishedTls, HandoffLandingError> {
+    EstablishedTls::from_exported_state(state)
         .map_err(|_| HandoffLandingError::Protocol(HandoffError::State))
 }
 
@@ -827,12 +813,13 @@ mod tests {
         },
         protocol::{
             handoff::{
-                ContinuationState, HEADER_LEN, HandoffLandingKeys, HandoffPsk, HandoffReplayCache,
-                message_len_from_header, seal_transfer,
+                CONTINUATION_STATE_VERSION, ContinuationState, HEADER_LEN, HandoffError,
+                HandoffLandingKeys, HandoffPsk, HandoffReplayCache, message_len_from_header,
+                open_transfer, seal_transfer,
             },
             reality::tls13::{
-                CipherSuite, ContentType, EstablishedTls, ExportedRecordState, Tls13KeySchedule,
-                Tls13RecordLayer, TlsApplicationIo, TrafficKeys, read_tls_record,
+                CipherSuite, ContentType, EstablishedTls, ExportedRecordState, Tls13RecordLayer,
+                TlsApplicationIo, TrafficSecret, read_tls_record, resume_application_halves,
             },
             vless::{
                 Address, Command, Destination, UserId, VERSION, VISION_FLOW, VisionCommand,
@@ -1160,6 +1147,68 @@ mod tests {
         ));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn mixed_continuation_versions_close_without_response_or_destination_dial() {
+        let destination =
+            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("destination must bind");
+        destination
+            .set_nonblocking(true)
+            .expect("nonblocking destination");
+        let state = test_state(Destination::new(
+            Address::Ipv4(Ipv4Addr::LOCALHOST),
+            destination
+                .local_addr()
+                .expect("destination address")
+                .port(),
+        ));
+        for state_version in [0, 1, CONTINUATION_STATE_VERSION + 1] {
+            for include_body in [false, true] {
+                let (mut line, landing) = tcp_pair().await;
+                let handler = Arc::new(test_landing_handler());
+                let accepted_handler = handler.clone();
+                let task = tokio::spawn(async move { accepted_handler.handle(landing).await });
+                let mut message = Vec::new();
+                seal_transfer(
+                    &state,
+                    &HandoffPsk::new(PSK),
+                    &StaticX25519Key::new(&LANDING_SECRET).public_key(),
+                    [0x44; 32],
+                    unix_seconds().expect("clock"),
+                    &mut message,
+                )
+                .expect("transfer fixture");
+                message[5] = state_version;
+                let sent = if include_body {
+                    &message[..]
+                } else {
+                    &message[..HEADER_LEN]
+                };
+                line.write_all(sent).await.expect("mixed-version transfer");
+                assert!(matches!(
+                    timeout(TEST_TIMEOUT, task)
+                        .await
+                        .expect("rejection deadline")
+                        .expect("handler join"),
+                    Err(HandoffLandingError::Protocol(HandoffError::Version))
+                ));
+                let mut response = [0_u8; 1];
+                let closed = timeout(TEST_TIMEOUT, line.read(&mut response))
+                    .await
+                    .expect("silent close deadline");
+                assert!(
+                    matches!(&closed, Ok(0))
+                        || matches!(&closed, Err(error) if error.kind() == io::ErrorKind::ConnectionReset),
+                    "mixed-version rejection must expose no response bytes"
+                );
+                assert_eq!(handler.replay.entry_count(), 0);
+                assert!(
+                    matches!(destination.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock),
+                    "version rejection must not reach destination connect"
+                );
+            }
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn valid_handoff_authenticates_across_the_pre_auth_idle_age_matrix() {
         let state = test_state(Destination::new(Address::Ipv4(Ipv4Addr::LOCALHOST), 9));
@@ -1213,12 +1262,14 @@ mod tests {
         destination: Destination,
         server_sequence: u64,
     ) -> ContinuationState {
+        let suite = CipherSuite::ChaCha20Poly1305Sha256;
         ContinuationState::new(
-            CipherSuite::ChaCha20Poly1305Sha256,
-            TrafficKeys::from_raw_parts(&[0x11; 32], [0x21; 12]).expect("client keys"),
+            suite,
+            TrafficSecret::from_bytes(suite.hash(), &[0x11; 32]).expect("client secret"),
             1,
-            TrafficKeys::from_raw_parts(&[0x12; 32], [0x22; 12]).expect("server keys"),
+            TrafficSecret::from_bytes(suite.hash(), &[0x12; 32]).expect("server secret"),
             server_sequence,
+            false,
             [0x33; 16],
             destination,
             Vec::new(),
@@ -1228,13 +1279,14 @@ mod tests {
     }
 
     #[test]
-    fn landing_resume_preserves_server_sequence_one() {
+    fn landing_resume_preserves_sequence_and_key_update_capability() {
         let suite = CipherSuite::ChaCha20Poly1305Sha256;
         let state = test_state_with_server_sequence(
             Destination::new(Address::Ipv4(Ipv4Addr::LOCALHOST), 443),
             1,
         );
-        let mut resumed = resume_tls(&state).expect("sequence-one state must resume");
+        let (exported, ..) = state.into_parts().expect("state must separate");
+        let mut resumed = resume_tls(exported).expect("sequence-one state must resume");
         assert_eq!(resumed.client_records_mut().records_used(), 1);
         assert_eq!(resumed.server_records_mut().records_used(), 1);
 
@@ -1247,7 +1299,7 @@ mod tests {
 
         let peer_state = ExportedRecordState::from_parts(
             suite,
-            TrafficKeys::from_raw_parts(&[0x12; 32], [0x22; 12]).expect("peer server keys"),
+            TrafficSecret::from_bytes(suite.hash(), &[0x12; 32]).expect("peer server secret"),
             1,
         )
         .expect("peer state must build");
@@ -1258,36 +1310,228 @@ mod tests {
         assert_eq!(opened.content_type(), ContentType::ApplicationData);
         assert_eq!(opened.plaintext(), b"next");
         assert_eq!(peer.records_used(), 2);
+
+        resumed
+            .server_records_mut()
+            .update_traffic_secret()
+            .expect("resumed generation must update");
+        peer.update_traffic_secret()
+            .expect("peer generation must update");
+        assert_eq!(resumed.server_records_mut().records_used(), 0);
+        assert_eq!(peer.records_used(), 0);
+        resumed
+            .server_records_mut()
+            .seal_into(ContentType::ApplicationData, b"updated", 0, &mut wire)
+            .expect("updated resumed server must seal");
+        let opened = peer
+            .open_in_place(&mut wire)
+            .expect("peer must authenticate the updated generation");
+        assert_eq!(opened.plaintext(), b"updated");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sealed_v2_resume_preserves_generations_buffers_response_and_future_updates() {
+        for suite in [
+            CipherSuite::Aes128GcmSha256,
+            CipherSuite::Aes256GcmSha384,
+            CipherSuite::ChaCha20Poly1305Sha256,
+        ] {
+            let layer = |seed| {
+                Tls13RecordLayer::from_traffic_secret(
+                    suite,
+                    TrafficSecret::from_bytes(
+                        suite.hash(),
+                        &[seed; 48][..suite.hash().output_len()],
+                    )
+                    .expect("traffic secret"),
+                )
+                .expect("record layer")
+            };
+            let mut client_records = layer(0x11);
+            let mut server_records = layer(0x12);
+            let mut peer_write = layer(0x11);
+            let mut peer_read = layer(0x12);
+            client_records
+                .update_traffic_secret()
+                .expect("pre-transfer client update");
+            peer_write
+                .update_traffic_secret()
+                .expect("peer client update");
+            let mut wire = Vec::new();
+            peer_write
+                .seal_into(ContentType::ApplicationData, b"boundary", 0, &mut wire)
+                .expect("boundary record");
+            client_records
+                .open_in_place(&mut wire)
+                .expect("boundary authentication");
+            server_records
+                .seal_into(ContentType::ApplicationData, b"", 0, &mut wire)
+                .expect("cover-shaped record");
+            peer_read
+                .open_in_place(&mut wire)
+                .expect("cover-shaped authentication");
+            peer_write
+                .seal_into(ContentType::ApplicationData, b"read ahead", 0, &mut wire)
+                .expect("read-ahead record");
+            let (_, client_secret, client_sequence) = client_records
+                .into_exported_state()
+                .expect("client export")
+                .into_parts();
+            let (_, server_secret, server_sequence) = server_records
+                .into_exported_state()
+                .expect("server export")
+                .into_parts();
+            let state = ContinuationState::new(
+                suite,
+                client_secret,
+                client_sequence,
+                server_secret,
+                server_sequence,
+                true,
+                *USER.as_bytes(),
+                Destination::new(Address::Ipv4(Ipv4Addr::LOCALHOST), 443),
+                std::mem::take(&mut wire),
+                b"prefetched Vision bytes".to_vec(),
+            )
+            .expect("continuation");
+            let mut message = Vec::new();
+            let timestamp = unix_seconds().expect("clock");
+            seal_transfer(
+                &state,
+                &HandoffPsk::new(PSK),
+                &StaticX25519Key::new(&LANDING_SECRET).public_key(),
+                [0x44; 32],
+                timestamp,
+                &mut message,
+            )
+            .expect("sealed v2 transfer");
+            drop(state);
+            let handler = test_landing_handler();
+            let state = open_transfer(&message, &handler.keys, &handler.replay, timestamp, 30)
+                .expect("authenticated v2 transfer")
+                .into_state();
+            let (exported, user, destination, pending, prefetched, response_pending) =
+                state.into_parts().expect("move transferred state");
+            assert_eq!(user, *USER.as_bytes());
+            assert_eq!(destination.port(), 443);
+            assert_eq!(prefetched, b"prefetched Vision bytes");
+            assert!(response_pending);
+            let tls = resume_tls(exported).expect("resume generations");
+            let (mut peer, transport) = tokio::io::duplex(4096);
+            let (read, write) = tokio::io::split(transport);
+            let (mut reader, mut writer) =
+                resume_application_halves(read, pending, write, tls, response_pending);
+            assert_eq!(
+                reader
+                    .read_application(TEST_TIMEOUT)
+                    .await
+                    .expect("pending ciphertext")
+                    .plaintext(),
+                b"read ahead"
+            );
+            writer
+                .write_application(b"after transfer", TEST_TIMEOUT)
+                .await
+                .expect("resumed write");
+            let mut response = read_tls_record(&mut peer, TEST_TIMEOUT)
+                .await
+                .expect("owed response")
+                .into_wire();
+            let opened = peer_read
+                .open_in_place(&mut response)
+                .expect("old-generation response");
+            assert_eq!(opened.content_type(), ContentType::Handshake);
+            assert_eq!(opened.plaintext(), [24, 0, 0, 1, 0]);
+            peer_read
+                .update_traffic_secret()
+                .expect("response updates peer read");
+            let mut application = read_tls_record(&mut peer, TEST_TIMEOUT)
+                .await
+                .expect("post-response application")
+                .into_wire();
+            assert_eq!(
+                peer_read
+                    .open_in_place(&mut application)
+                    .expect("new-generation application")
+                    .plaintext(),
+                b"after transfer"
+            );
+            peer_write
+                .seal_into(ContentType::Handshake, &[24, 0, 0, 1, 1], 0, &mut wire)
+                .expect("future requested update");
+            peer_write
+                .update_traffic_secret()
+                .expect("future peer write generation");
+            peer.write_all(&wire).await.expect("future update write");
+            peer_write
+                .seal_into(
+                    ContentType::ApplicationData,
+                    b"future client data",
+                    0,
+                    &mut wire,
+                )
+                .expect("future client record");
+            peer.write_all(&wire).await.expect("future data write");
+            assert!(
+                reader
+                    .read_application(TEST_TIMEOUT)
+                    .await
+                    .expect("future update")
+                    .is_empty()
+            );
+            assert_eq!(
+                reader
+                    .read_application(TEST_TIMEOUT)
+                    .await
+                    .expect("future client data")
+                    .plaintext(),
+                b"future client data"
+            );
+            writer
+                .write_application(b"future server data", TEST_TIMEOUT)
+                .await
+                .expect("future requested response");
+            let mut response = read_tls_record(&mut peer, TEST_TIMEOUT)
+                .await
+                .expect("future response")
+                .into_wire();
+            assert_eq!(
+                peer_read
+                    .open_in_place(&mut response)
+                    .expect("current-generation response")
+                    .plaintext(),
+                [24, 0, 0, 1, 0]
+            );
+            peer_read
+                .update_traffic_secret()
+                .expect("future peer read generation");
+            let mut application = read_tls_record(&mut peer, TEST_TIMEOUT)
+                .await
+                .expect("future server application")
+                .into_wire();
+            assert_eq!(
+                peer_read
+                    .open_in_place(&mut application)
+                    .expect("future server data")
+                    .plaintext(),
+                b"future server data"
+            );
+        }
     }
 
     fn tls_states() -> (EstablishedTls, Tls13RecordLayer, Tls13RecordLayer) {
         let suite = CipherSuite::Aes128GcmSha256;
-        let schedule = Tls13KeySchedule::new(
-            suite,
-            &[0x11; 32],
-            &suite.hash().digest(b"Handoff server hello transcript"),
-        )
-        .expect("test schedule must initialize");
-        let secrets = schedule
-            .application_traffic_secrets(&suite.hash().digest(b"Handoff test transcript"))
-            .expect("test application secrets must derive");
         let layer = || {
-            Tls13RecordLayer::new(
-                suite,
-                schedule
-                    .traffic_keys(secrets.client())
-                    .expect("client keys must derive"),
-            )
-            .expect("client record layer must initialize")
+            let secret = TrafficSecret::from_bytes(suite.hash(), &[0x31; 32])
+                .expect("client secret must import");
+            Tls13RecordLayer::from_traffic_secret(suite, secret)
+                .expect("client record layer must initialize")
         };
         let server_layer = || {
-            Tls13RecordLayer::new(
-                suite,
-                schedule
-                    .traffic_keys(secrets.server())
-                    .expect("server keys must derive"),
-            )
-            .expect("server record layer must initialize")
+            let secret = TrafficSecret::from_bytes(suite.hash(), &[0x32; 32])
+                .expect("server secret must import");
+            Tls13RecordLayer::from_traffic_secret(suite, secret)
+                .expect("server record layer must initialize")
         };
         (
             EstablishedTls::from_test_records(suite, layer(), server_layer()),
