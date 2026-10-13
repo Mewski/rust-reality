@@ -1165,6 +1165,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rr-evidence-observe-server"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "rust-reality",
+ "tokio",
+]
+
+[[package]]
 name = "rr-linux"
 version = "0.1.0"
 dependencies = [
