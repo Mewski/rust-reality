@@ -55,3 +55,5 @@ Related: PR that landed this tree; Issue #253; observability PRs #281 / #282.
 ## v2.0.3 H1–H4 attribution (2026-10-12 ~19:43 PT)
 
 - [`v2.0.3-h1h4-attribution/`](./v2.0.3-h1h4-attribution/) — connection-stage diagram, failure taxonomy, H1–H4 table, cheap lib+OS re-run (**no PR-C**; field RCA still NOT_PROVEN)
+
+- [`v2.0.3-issue-261-remaining-risk.md`](./v2.0.3-issue-261-remaining-risk.md) — #261 OPEN remaining risk (no allocator/PSS formula change)

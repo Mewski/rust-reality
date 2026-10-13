@@ -22,9 +22,7 @@ use std::{
 
 use clap::{Parser, Subcommand};
 use rust_reality::{
-    BUILD_COMMIT,
-    config::load,
-    runtime::machine::MachineReport,
+    BUILD_COMMIT, config::load, runtime::machine::MachineReport,
     server::production::ProductionServer,
 };
 
@@ -98,11 +96,13 @@ fn main() -> ExitCode {
 fn serve(config_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let hz = observe_hz();
     // Evidence marker only — never a product log. Slot server.log proves Idle vs Observed.
-    eprintln!( "rr-evidence-observe-server: observe_hz={hz}");
+    eprintln!("rr-evidence-observe-server: observe_hz={hz}");
     let config = load(&config_path)?;
     let machine = MachineReport::detect();
-    let resource_mode =
-        rust_reality::runtime::policy::resolve_resource_mode(config.node().runtime().profile(), &machine);
+    let resource_mode = rust_reality::runtime::policy::resolve_resource_mode(
+        config.node().runtime().profile(),
+        &machine,
+    );
     let topology = rust_reality::runtime::plan::RuntimeTopology::for_mode(
         resource_mode,
         machine.effective_cpus(),
