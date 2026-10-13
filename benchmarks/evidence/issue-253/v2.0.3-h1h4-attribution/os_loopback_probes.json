@@ -1,0 +1,36 @@
+{
+  "when": "2026-10-12T19:45:00-07:00",
+  "host": "box-loopback",
+  "results": [
+    {
+      "scenario": "landing_not_listening",
+      "verdict": "PASS",
+      "errno": 111,
+      "errno_name": "ECONNREFUSED"
+    },
+    {
+      "scenario": "landing_stop_listen_established_survives",
+      "verdict": "PASS",
+      "new_dial_errno": 111,
+      "new_dial_refused": true,
+      "established_send_ok": true,
+      "established_errno": null,
+      "note": "listen-down (process still conceptually alive): new ECONNREFUSED; established may survive"
+    },
+    {
+      "scenario": "peer_teardown_terminates_established_and_new_dials_refuse",
+      "verdict": "PASS",
+      "new_dial_errno": 111,
+      "new_dial_refused": true,
+      "established_dead": true,
+      "established_errno": null,
+      "note": "process-exit analogue: established die + new refuse"
+    },
+    {
+      "scenario": "silent_blackhole_undetectable_by_try_read",
+      "verdict": "PASS",
+      "would_block": true,
+      "note": "idle peer without FIN/RST looks healthy to try_read (WouldBlock)"
+    }
+  ]
+}

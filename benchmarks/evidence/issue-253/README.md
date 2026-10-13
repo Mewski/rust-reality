@@ -51,3 +51,7 @@ Related: PR that landed this tree; Issue #253; observability PRs #281 / #282.
 | [v2.0.3-aa-setup-rate-d6a9ea0/](./v2.0.3-aa-setup-rate-d6a9ea0/) | Same-binary A/A setup-rate **PASS** (`runKind=control`) |
 
 - [`v2.0.3-idle-vs-observed-d6a9ea0/`](./v2.0.3-idle-vs-observed-d6a9ea0/) — Idle vs Observed setup-rate (**keep-as-is**, no PR-B)
+
+## v2.0.3 H1–H4 attribution (2026-10-12 ~19:43 PT)
+
+- [`v2.0.3-h1h4-attribution/`](./v2.0.3-h1h4-attribution/) — connection-stage diagram, failure taxonomy, H1–H4 table, cheap lib+OS re-run (**no PR-C**; field RCA still NOT_PROVEN)
