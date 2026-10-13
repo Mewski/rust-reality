@@ -36,3 +36,9 @@ cargo test --lib -- \
 ```
 
 Related: PR that landed this tree; Issue #253; observability PRs #281 / #282.
+
+## v2.0.3 continuity (2026-10-12)
+
+- [`v2.0.3-progress-ledger.md`](v2.0.3-progress-ledger.md) — live progress ledger (SHA, gates, blockers, RC).
+- [`observability-performance-audit.md`](observability-performance-audit.md) — PR-A hot-path / lock / ordering audit on `d6a9ea0`.
+
