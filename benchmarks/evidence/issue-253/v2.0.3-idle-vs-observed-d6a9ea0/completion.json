@@ -1,0 +1,11 @@
+{
+  "collector": "benchmark-setup-rate",
+  "evidence": {
+    "path": "/workspace/evidence-v203-observe/idle-vs-observed-setup-rate/environment.json",
+    "sha256": "656f70a169e0349645a20ec37cfb73205ea2d7d28bf3b55ed0f85c0d788c34fa"
+  },
+  "exitCode": 0,
+  "runId": "benchmark-setup-rate-1791859062-1221732",
+  "schemaVersion": 1,
+  "status": "COMPLETE"
+}

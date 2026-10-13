@@ -65,8 +65,8 @@ On the laboratory i5-1240P, 12-block A/A setup-rate `serverCpuPerConnection` int
 | Claim | Status |
 | --- | --- |
 | Observer adds per-byte data-plane cost | **Not tested here** (code review already: none) |
-| `snapshot()` vs `checkout` contention under load | **NOT_RUN** — needs Idle vs Observed (external 1 Hz `TransportTelemetry::snapshot`) |
-| PR-B (shorten snapshot lock) justified | **No** — keep-as-is until Observed delta > this host's A/A noise |
+| `snapshot()` vs `checkout` contention under load | **Measured** — [`../v2.0.3-idle-vs-observed-d6a9ea0/`](../v2.0.3-idle-vs-observed-d6a9ea0/); all Observed/Idle CI contain 1.0 |
+| PR-B (shorten snapshot lock) justified | **No** — keep-as-is (Observed ≤ host A/A noise) |
 | Production #253 root cause | **NOT_PROVEN** |
 
 ## Artifacts in this directory
@@ -77,13 +77,6 @@ On the laboratory i5-1240P, 12-block A/A setup-rate `serverCpuPerConnection` int
 - `sample-slot/` — one schedstat + identity for format proof
 - Full 48-slot tree (~12 MiB) retained on executor box under `/workspace/evidence-v203-aa/aa-setup-rate-d6a9ea0/slots/` (not committed)
 
-## Idle vs Observed — scheduled (not executed)
+## Idle vs Observed — executed
 
-No first-class `cargo dev bench` flag for external snapshot polling. Planned:
-
-1. Start ProductionServer from the **same** freeze ELF (STANDALONE or LINE fixture).
-2. External process: `TransportTelemetry::snapshot()` at **1 Hz** (or drive via a small `#[cfg(test)]` / examples harness that upgrades Weak and calls snapshot — **must not** bake a production shortcut path).
-3. Paired setup-rate (or checkout-focused micro) **Idle** (0 Hz) vs **Observed** (1 Hz), ≥12 blocks, `schedstat`, same ELF both sides of each cell's comparison dimension = observation rate.
-4. Gate: Observed/Idle median ratio bootstrap95 must exclude 1.0 **and** exceed A/A width on the **same** host before PR-B.
-
-Highest-signal subset already available without new product code: existing unit test `aggregation_saturates_without_allocating_or_retaining_input` proves snapshot path allocates 0 — not a latency A/B.
+See [`../v2.0.3-idle-vs-observed-d6a9ea0/`](../v2.0.3-idle-vs-observed-d6a9ea0/). Evidence harness (in-process `snapshot` @ 1 Hz vs idle); **keep-as-is / no PR-B**.

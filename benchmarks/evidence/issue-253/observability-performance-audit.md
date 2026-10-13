@@ -112,8 +112,7 @@ cargo dev bench run --suite setup-rate \
   --baseline-commit d6a9ea0b0b646f426a89b83ecb7537a13f8fea1c \
   --rust-bin <same-frozen-elf>
 
-# Later: Idle vs Observed requires an external snapshot poller at fixed Hz
-# against a ProductionServer; do not bake benchmark-only shortcuts into the binary.
+# Idle vs Observed: tools/rr-evidence-observe-server + observe.hz sidecar (see evidence tree).
 ```
 
 Criterion benches under `benches/` (vless_decode, vision, relay_backends, …) do **not** cover pool Mutex — do not misuse them as telemetry proof.
@@ -133,8 +132,8 @@ Criterion benches under `benches/` (vless_decode, vision, relay_backends, …) d
 | Question | Answer |
 | --- | --- |
 | Hot-path telemetry violation? | **No** (code review) |
-| Worth product change now? | **No** — keep-as-is (A/A PASS; Observed **NOT_RUN**) |
+| Worth product change now? | **No** — keep-as-is (A/A PASS; Idle vs Observed **PASS**, CI∋1.0) |
 | Candidate micro-change if measured hot? | Shorten `snapshot` lock (copy then drop) |
 | RC impact of this PR | Docs/evidence only; Frozen tip unchanged |
 
-**Evidence tier:** code-review conclusions = review PASS for design invariants; same-binary A/A setup-rate = **PASS** (control). Observer Idle vs Observed under load = **NOT_RUN**.
+**Evidence tier:** code-review conclusions = review PASS for design invariants; same-binary A/A setup-rate = **PASS** (control). Observer Idle vs Observed under load = **PASS / keep-as-is** ([`v2.0.3-idle-vs-observed-d6a9ea0/`](./v2.0.3-idle-vs-observed-d6a9ea0/)).

@@ -1,0 +1,12 @@
+{
+  "cpuMilliseconds": 936.689306,
+  "cpuNanoseconds": 936689306,
+  "schemaVersion": 1,
+  "source": "/proc/<pid>/task/*/schedstat",
+  "threadsAfter": 9,
+  "threadsBefore": 9,
+  "threadsExitedDuringWindow": 0,
+  "threadsStartedDuringWindow": 0,
+  "unattributedBoundNanoseconds": 0,
+  "wallNanoseconds": 1816740854
+}

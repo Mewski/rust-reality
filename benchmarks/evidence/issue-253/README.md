@@ -49,3 +49,5 @@ Related: PR that landed this tree; Issue #253; observability PRs #281 / #282.
 | [v2.0.3-progress-ledger.md](./v2.0.3-progress-ledger.md) | Cross-session ledger |
 | [observability-performance-audit.md](./observability-performance-audit.md) | PR-A code-path audit |
 | [v2.0.3-aa-setup-rate-d6a9ea0/](./v2.0.3-aa-setup-rate-d6a9ea0/) | Same-binary A/A setup-rate **PASS** (`runKind=control`) |
+
+- [`v2.0.3-idle-vs-observed-d6a9ea0/`](./v2.0.3-idle-vs-observed-d6a9ea0/) — Idle vs Observed setup-rate (**keep-as-is**, no PR-B)
