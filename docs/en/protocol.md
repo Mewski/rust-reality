@@ -95,9 +95,9 @@ HMAC; no logical flow is retried after the complete request write.
 
 Handoff is an internal session transfer, not a public protocol. After REALITY
 authentication, VLESS decode, and routing, the line node transfers the whole
-session — TLS record state, sequence numbers, Vision context, and pending
-bytes — to a landing node in one sealed, replay-protected message; the line
-node then relays the session's TLS ciphertext.
+session, including current traffic secrets, sequence numbers, an owed KeyUpdate
+response, and pending bytes, to a landing node in one sealed, replay-protected
+message. The line node then relays the session's TLS ciphertext.
 
 The transfer is sealed with a fresh ephemeral X25519 exchange against the
 landing node's static key, mixed with an independent pair PSK in one
@@ -115,6 +115,10 @@ node applies no
 routing policy to the transferred destination and holds live session keys, so
 its memory is part of the session's secrecy boundary. The Handoff listener
 must be reachable only from the line nodes' addresses.
+
+The current framing is `HND1` with protocol version 1 and continuation-state
+version 2. Version-1 state is rejected, not converted. The deployment and drain
+boundary for upgrades and rollback is the [Handoff operator contract](configuration/handoff.md#deploying-and-rolling-back-the-current-contract).
 
 The TCP connection may likewise be established in advance without changing
 Handoff wire bytes or authority. The first transfer byte ends a bounded

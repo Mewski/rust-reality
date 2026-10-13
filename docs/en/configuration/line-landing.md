@@ -39,8 +39,9 @@ stream. The landing checks the key, refuses replays, dials the destination,
 and forwards. It is not designed to survive a hostile network — it is designed
 for a hop between two machines you control, so it is cheap.
 
-If the landing must not be able to read what it forwards, use
-[Handoff](handoff.md) instead.
+To move per-byte TLS/Vision work to the landing while carrying ciphertext on
+the private hop, use [Handoff](handoff.md). The landing still holds session keys
+and must be trusted with content.
 
 ## Before you start
 

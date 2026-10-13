@@ -97,6 +97,10 @@ jobs:
           echo "XRAY_BIN=$RUNNER_TEMP/rr-fixtures/xray/xray" >> "$GITHUB_ENV"
           echo "OPENSSL_BIN=$RUNNER_TEMP/rr-fixtures/openssl/bin/openssl" >> "$GITHUB_ENV"
           echo "$RUNNER_TEMP/rr-fixtures/openssl/bin" >> "$GITHUB_PATH"
+      - name: Verify TLS KeyUpdate with the pinned OpenSSL peer
+        run: |
+          cargo test --lib --locked openssl_interop -- --ignored --nocapture
+          cargo test --lib --locked --no-default-features openssl_interop -- --ignored --nocapture
       - name: Freeze one release candidate and record identities
         timeout-minutes: 15
         run: |

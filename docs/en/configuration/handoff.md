@@ -13,8 +13,9 @@ and dials the destination. Session keys never leave the line node.
 
 With Handoff, the line node terminates the client's *handshake*, finishes
 VLESS decode and routing, then transfers the whole live TLS session to the
-landing in one sealed message — traffic keys, record sequences, cipher suite,
-routing decision, and pending buffers. After a successful transfer:
+landing in one sealed message: current traffic secrets, record sequences, cipher
+suite, an owed KeyUpdate response, routing decision, and pending buffers. After a
+successful transfer:
 
 - the **landing** reconstructs the TLS 1.3 record layers, holds the session
   keys, dials the destination, and runs the standard Vision relay;
@@ -49,9 +50,9 @@ keys and is inside the session's secrecy boundary. See
 ## What it costs
 
 The transfer is a cryptographic operation per connection rather than per byte,
-so the cost is at setup, not throughput. The landing must run the same version
-family as the line node, because the sealed transfer is an internal wire
-contract between them.
+so the cost is at setup, not throughput. LINE and LANDING must implement the
+same continuation-state contract. A shared release family or unchanged
+configuration is not proof of wire compatibility.
 
 ## The keys
 
@@ -159,6 +160,41 @@ Leave them alone unless a measured problem says otherwise.
 `check` reads one file and cannot verify a key *pair* across two machines. A
 mismatched pair produces a transfer the landing cannot open, which is a
 connection that fails after authentication rather than a validation error.
+
+## Deploying and rolling back the current contract
+
+The current transfer uses `HND1` framing, protocol version **1**, and
+continuation-state version **2**. The framing version does not imply acceptance
+of version-1 state. Version 2 transfers each direction's current traffic secret
+and next record sequence, plus any pending KeyUpdate response. LANDING can then
+answer the request and derive later traffic generations. Version-1 state
+contained only derived keys and IVs and cannot provide that capability.
+
+There is one current parser, with no negotiation, downgrade, or conversion.
+A version-1 LINE cannot transfer to a version-2 LANDING. A version-2 LINE cannot
+transfer to a version-1 LANDING. The receiving side rejects a mismatched header
+before reading the body or connecting the destination. It closes without
+response bytes, so the affected client connection fails. Retired PSKs or
+private keys permit credential rotation only, not mixed state versions.
+
+For a contract-changing upgrade:
+
+1. Validate both configurations with `rust-reality check --config config.json`.
+   This checks each file, not the remote binary contract.
+2. Stop admitting new sessions to the affected LINE/LANDING pairs. Drain their
+   active sessions and retire their unused warm TCP connections before replacing
+   either process. A forced shutdown terminates remaining sessions.
+3. Deploy both ends with the same current contract before reopening admission.
+   In a multi-node topology, every selectable LINE→LANDING pair must agree.
+   Separate cohorts are safe only when routing cannot cross their contracts.
+4. Qualify the exact binaries together, including requested and later KeyUpdate,
+   before returning the cohort to service.
+
+Rollback crosses the same drain boundary. Stop new version-2 sessions and drain
+or terminate them, then restore a matching earlier binary pair before reopening
+admission. An earlier binary cannot import version-2 state or take over a live
+LANDING-owned session. Existing sessions continue only while their original
+owners remain running. Do not roll back one reachable endpoint independently.
 
 ## Rotating without dropping traffic
 

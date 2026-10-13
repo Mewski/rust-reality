@@ -71,6 +71,27 @@ cargo nextest run -p rust-reality --locked          # faster, CI-equivalent prof
 cargo test --workspace --locked                     # full default suite
 ```
 
+The independent TLS KeyUpdate regressions are explicit external-process tests:
+
+```shell
+OPENSSL_BIN=/path/to/openssl cargo test --lib --locked openssl_interop -- --ignored --nocapture
+OPENSSL_BIN=/path/to/openssl cargo test --lib --locked --no-default-features openssl_interop -- --ignored --nocapture
+```
+
+They require OpenSSL 3.x with TLS 1.3, X25519, Ed25519 and all three supported
+cipher suites, local process execution and loopback TCP. Without `OPENSSL_BIN`,
+the executable is resolved through `PATH`. A missing or incompatible executable
+fails an explicit run. For a relocated OpenSSL installation, set `OPENSSL_CONF`
+to its configuration file if needed. The tests are ignored in ordinary runs
+because the executable is external.
+
+OpenSSL performs the real client handshake and decrypts exact ordered application
+bytes after requested updates, proactive rotations and a concurrent requested
+update beside a four-record batch. A test-only reduced usage ceiling forces
+proactive rotations without changing record sequences. The generated REALITY
+certificate is not trust-validated. These regressions do not replace fresh
+Xray REALITY/Vision, native or QEMU qualification at the exact candidate SHA.
+
 ## Tooling tests
 
 The `rr-dev` tooling workspace has its own suite, and `cargo dev check` runs it:
