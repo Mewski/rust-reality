@@ -53,6 +53,25 @@ cargo nextest run -p rust-reality --locked
 cargo test --workspace --locked
 ```
 
+独立 TLS KeyUpdate 回归通过显式外部进程测试执行：
+
+```shell
+OPENSSL_BIN=/path/to/openssl cargo test --lib --locked openssl_interop -- --ignored --nocapture
+OPENSSL_BIN=/path/to/openssl cargo test --lib --locked --no-default-features openssl_interop -- --ignored --nocapture
+```
+
+需要支持 TLS 1.3、X25519、Ed25519 及三种受支持密码套件的 OpenSSL 3.x，
+以及本地进程执行和回环 TCP。未设置 `OPENSSL_BIN` 时从 `PATH` 查找。
+显式运行时，缺失或不兼容的可执行文件会导致失败。重定位 OpenSSL 安装时，
+按需设置 `OPENSSL_CONF` 指向其配置文件。由于依赖外部可执行文件，
+这些测试在常规运行中标记为 ignored。
+
+OpenSSL 执行真实客户端握手，并在请求式更新、主动轮换及并发请求式更新与
+四记录批处理之后解密并验证应用字节的精确顺序。仅测试使用的较低用量上限
+在不修改记录序号的情况下触发主动轮换。生成的 REALITY 证书不进行信任验证。
+这些回归不能替代精确候选 SHA 上新执行的 Xray REALITY/Vision、原生或 QEMU
+资格验证。
+
 ## 工具测试
 
 `rr-dev` 拥有独立工具工作区。`cargo dev check` 在所有范围检查其格式和严格
