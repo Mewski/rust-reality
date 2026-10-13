@@ -9,9 +9,13 @@ English | [简体中文](README.zh-CN.md)
 `rust-reality` is a Linux-focused, single-binary proxy server. Its only public
 client entry is **VLESS + REALITY + `xtls-rprx-vision`**. An optional, separate
 NXR protocol carries authenticated per-flow traffic from a public line node to
-a firewall-restricted landing node; the Handoff protocol carries the client's
-own TLS session there instead, so the landing forwards ciphertext it cannot
-read.
+a firewall-restricted landing node. The Handoff protocol instead finishes the
+client handshake and auth on the line node, then transfers sealed TLS session
+state and keys to the landing so that node can rebuild the record layer; after
+transfer the line node is only a thin ciphertext forwarder. The LINE→LANDING
+hop still carries client TLS ciphertext, but the landing is inside the
+decrypting trust boundary. NXR keeps session keys on the line; Handoff moves
+key ownership to the landing.
 
 New contributors should start with [CONTRIBUTING.md](CONTRIBUTING.md) and the
 [documentation index](docs/en/index.md); together they route development work
