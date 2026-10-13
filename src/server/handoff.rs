@@ -813,12 +813,13 @@ mod tests {
         },
         protocol::{
             handoff::{
-                ContinuationState, HEADER_LEN, HandoffLandingKeys, HandoffPsk, HandoffReplayCache,
-                message_len_from_header, seal_transfer,
+                CONTINUATION_STATE_VERSION, ContinuationState, HEADER_LEN, HandoffError,
+                HandoffLandingKeys, HandoffPsk, HandoffReplayCache, message_len_from_header,
+                open_transfer, seal_transfer,
             },
             reality::tls13::{
                 CipherSuite, ContentType, EstablishedTls, ExportedRecordState, Tls13RecordLayer,
-                TlsApplicationIo, TrafficSecret, read_tls_record,
+                TlsApplicationIo, TrafficSecret, read_tls_record, resume_application_halves,
             },
             vless::{
                 Address, Command, Destination, UserId, VERSION, VISION_FLOW, VisionCommand,
@@ -1019,6 +1020,110 @@ mod tests {
         pool.deactivate();
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn silent_warm_carrier_times_out_without_replaying_a_committed_transfer() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("fault listener");
+        let budget = FdBudget::new(64);
+        let handler = handoff_vision_handler_with_warm(
+            listener.local_addr().expect("address"),
+            true,
+            budget.clone(),
+        );
+        handler.outbounds().activate_warm_pools();
+        let (mut blackhole, _) = timeout(TEST_TIMEOUT, listener.accept())
+            .await
+            .expect("warm dial deadline")
+            .expect("warm dial");
+        timeout(TEST_TIMEOUT, async {
+            while handler.outbounds().warm_pool_snapshots()[0].pool.ready != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("warm READY barrier");
+        let (mut client, server) = tcp_pair().await;
+        let (tls, mut client_write, _client_read) = tls_states();
+        let established =
+            RealityEstablished::from_test_parts(TlsApplicationIo::new(server, tls), USER);
+        let request = vision_request(443, b"one logical request");
+        let mut record = Vec::new();
+        client_write
+            .seal_into(ContentType::ApplicationData, &request, 0, &mut record)
+            .expect("seal request");
+        client.write_all(&record).await.expect("send request");
+        // The fault consumes the *complete* transfer, acknowledging TCP bytes
+        // but withholding all protocol downlink. A safe retry is impossible:
+        // a real peer could already have acted on these authenticated bytes.
+        let consume = async {
+            let mut header = [0_u8; HEADER_LEN];
+            blackhole
+                .read_exact(&mut header)
+                .await
+                .expect("transfer header");
+            let length = message_len_from_header(&header).expect("bounded transfer");
+            let mut remainder = vec![0_u8; length - HEADER_LEN];
+            blackhole
+                .read_exact(&mut remainder)
+                .await
+                .expect("complete transfer");
+            // Keep the socket open in the enclosing scope until the deadline.
+            length
+        };
+        let (result, length) = timeout(TEST_TIMEOUT, async {
+            tokio::join!(handler.handle(established), consume)
+        })
+        .await
+        .expect("silent warm flow must fail within the first-byte bound");
+        assert!(length > HEADER_LEN);
+        assert!(matches!(
+            result,
+            Err(VisionSessionError::HandoffLine(
+                HandoffLineError::LandingRejected
+            ))
+        ));
+        let error = timeout(TEST_TIMEOUT, client.read(&mut [0_u8; 1]))
+            .await
+            .expect("client reset deadline")
+            .expect_err("failed transferred session must reset");
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+        let snapshot = handler.outbounds().warm_pool_snapshots()[0].pool;
+        assert_eq!(snapshot.checkout_total, 1);
+        assert_eq!(snapshot.checkout_hit, 1);
+        assert_eq!(
+            snapshot.cold_fallback, 0,
+            "complete transfer must never be cold-replayed"
+        );
+        assert_eq!(
+            snapshot.in_use, 0,
+            "failed flow releases its checkout permit"
+        );
+        // Refilling TCP is allowed; replaying protocol bytes on that socket is
+        // not. Observe the sole replacement without changing socket policy.
+        let (mut replacement, _) = timeout(TEST_TIMEOUT, listener.accept())
+            .await
+            .expect("refill deadline")
+            .expect("refill TCP");
+        assert!(
+            timeout(Duration::from_millis(30), replacement.read(&mut [0_u8; 1]))
+                .await
+                .is_err(),
+            "refill must remain protocol-unprivileged"
+        );
+        handler.outbounds().deactivate_warm_pools();
+        drop(blackhole);
+        drop(replacement);
+        timeout(TEST_TIMEOUT, async {
+            while budget.in_use() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("every warm and checked-out descriptor permit returns");
+        assert_eq!(budget.underflows(), 0);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn first_handoff_byte_enters_the_short_authentication_deadline() {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -1040,6 +1145,68 @@ mod tests {
             task.await.expect("handler must join"),
             Err(HandoffLandingError::Timeout)
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mixed_continuation_versions_close_without_response_or_destination_dial() {
+        let destination =
+            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("destination must bind");
+        destination
+            .set_nonblocking(true)
+            .expect("nonblocking destination");
+        let state = test_state(Destination::new(
+            Address::Ipv4(Ipv4Addr::LOCALHOST),
+            destination
+                .local_addr()
+                .expect("destination address")
+                .port(),
+        ));
+        for state_version in [0, 1, CONTINUATION_STATE_VERSION + 1] {
+            for include_body in [false, true] {
+                let (mut line, landing) = tcp_pair().await;
+                let handler = Arc::new(test_landing_handler());
+                let accepted_handler = handler.clone();
+                let task = tokio::spawn(async move { accepted_handler.handle(landing).await });
+                let mut message = Vec::new();
+                seal_transfer(
+                    &state,
+                    &HandoffPsk::new(PSK),
+                    &StaticX25519Key::new(&LANDING_SECRET).public_key(),
+                    [0x44; 32],
+                    unix_seconds().expect("clock"),
+                    &mut message,
+                )
+                .expect("transfer fixture");
+                message[5] = state_version;
+                let sent = if include_body {
+                    &message[..]
+                } else {
+                    &message[..HEADER_LEN]
+                };
+                line.write_all(sent).await.expect("mixed-version transfer");
+                assert!(matches!(
+                    timeout(TEST_TIMEOUT, task)
+                        .await
+                        .expect("rejection deadline")
+                        .expect("handler join"),
+                    Err(HandoffLandingError::Protocol(HandoffError::Version))
+                ));
+                let mut response = [0_u8; 1];
+                let closed = timeout(TEST_TIMEOUT, line.read(&mut response))
+                    .await
+                    .expect("silent close deadline");
+                assert!(
+                    matches!(&closed, Ok(0))
+                        || matches!(&closed, Err(error) if error.kind() == io::ErrorKind::ConnectionReset),
+                    "mixed-version rejection must expose no response bytes"
+                );
+                assert_eq!(handler.replay.entry_count(), 0);
+                assert!(
+                    matches!(destination.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock),
+                    "version rejection must not reach destination connect"
+                );
+            }
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -1162,6 +1329,196 @@ mod tests {
         assert_eq!(opened.plaintext(), b"updated");
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn sealed_v2_resume_preserves_generations_buffers_response_and_future_updates() {
+        for suite in [
+            CipherSuite::Aes128GcmSha256,
+            CipherSuite::Aes256GcmSha384,
+            CipherSuite::ChaCha20Poly1305Sha256,
+        ] {
+            let layer = |seed| {
+                Tls13RecordLayer::from_traffic_secret(
+                    suite,
+                    TrafficSecret::from_bytes(
+                        suite.hash(),
+                        &[seed; 48][..suite.hash().output_len()],
+                    )
+                    .expect("traffic secret"),
+                )
+                .expect("record layer")
+            };
+            let mut client_records = layer(0x11);
+            let mut server_records = layer(0x12);
+            let mut peer_write = layer(0x11);
+            let mut peer_read = layer(0x12);
+            client_records
+                .update_traffic_secret()
+                .expect("pre-transfer client update");
+            peer_write
+                .update_traffic_secret()
+                .expect("peer client update");
+            let mut wire = Vec::new();
+            peer_write
+                .seal_into(ContentType::ApplicationData, b"boundary", 0, &mut wire)
+                .expect("boundary record");
+            client_records
+                .open_in_place(&mut wire)
+                .expect("boundary authentication");
+            server_records
+                .seal_into(ContentType::ApplicationData, b"", 0, &mut wire)
+                .expect("cover-shaped record");
+            peer_read
+                .open_in_place(&mut wire)
+                .expect("cover-shaped authentication");
+            peer_write
+                .seal_into(ContentType::ApplicationData, b"read ahead", 0, &mut wire)
+                .expect("read-ahead record");
+            let (_, client_secret, client_sequence) = client_records
+                .into_exported_state()
+                .expect("client export")
+                .into_parts();
+            let (_, server_secret, server_sequence) = server_records
+                .into_exported_state()
+                .expect("server export")
+                .into_parts();
+            let state = ContinuationState::new(
+                suite,
+                client_secret,
+                client_sequence,
+                server_secret,
+                server_sequence,
+                true,
+                *USER.as_bytes(),
+                Destination::new(Address::Ipv4(Ipv4Addr::LOCALHOST), 443),
+                std::mem::take(&mut wire),
+                b"prefetched Vision bytes".to_vec(),
+            )
+            .expect("continuation");
+            let mut message = Vec::new();
+            let timestamp = unix_seconds().expect("clock");
+            seal_transfer(
+                &state,
+                &HandoffPsk::new(PSK),
+                &StaticX25519Key::new(&LANDING_SECRET).public_key(),
+                [0x44; 32],
+                timestamp,
+                &mut message,
+            )
+            .expect("sealed v2 transfer");
+            drop(state);
+            let handler = test_landing_handler();
+            let state = open_transfer(&message, &handler.keys, &handler.replay, timestamp, 30)
+                .expect("authenticated v2 transfer")
+                .into_state();
+            let (exported, user, destination, pending, prefetched, response_pending) =
+                state.into_parts().expect("move transferred state");
+            assert_eq!(user, *USER.as_bytes());
+            assert_eq!(destination.port(), 443);
+            assert_eq!(prefetched, b"prefetched Vision bytes");
+            assert!(response_pending);
+            let tls = resume_tls(exported).expect("resume generations");
+            let (mut peer, transport) = tokio::io::duplex(4096);
+            let (read, write) = tokio::io::split(transport);
+            let (mut reader, mut writer) =
+                resume_application_halves(read, pending, write, tls, response_pending);
+            assert_eq!(
+                reader
+                    .read_application(TEST_TIMEOUT)
+                    .await
+                    .expect("pending ciphertext")
+                    .plaintext(),
+                b"read ahead"
+            );
+            writer
+                .write_application(b"after transfer", TEST_TIMEOUT)
+                .await
+                .expect("resumed write");
+            let mut response = read_tls_record(&mut peer, TEST_TIMEOUT)
+                .await
+                .expect("owed response")
+                .into_wire();
+            let opened = peer_read
+                .open_in_place(&mut response)
+                .expect("old-generation response");
+            assert_eq!(opened.content_type(), ContentType::Handshake);
+            assert_eq!(opened.plaintext(), [24, 0, 0, 1, 0]);
+            peer_read
+                .update_traffic_secret()
+                .expect("response updates peer read");
+            let mut application = read_tls_record(&mut peer, TEST_TIMEOUT)
+                .await
+                .expect("post-response application")
+                .into_wire();
+            assert_eq!(
+                peer_read
+                    .open_in_place(&mut application)
+                    .expect("new-generation application")
+                    .plaintext(),
+                b"after transfer"
+            );
+            peer_write
+                .seal_into(ContentType::Handshake, &[24, 0, 0, 1, 1], 0, &mut wire)
+                .expect("future requested update");
+            peer_write
+                .update_traffic_secret()
+                .expect("future peer write generation");
+            peer.write_all(&wire).await.expect("future update write");
+            peer_write
+                .seal_into(
+                    ContentType::ApplicationData,
+                    b"future client data",
+                    0,
+                    &mut wire,
+                )
+                .expect("future client record");
+            peer.write_all(&wire).await.expect("future data write");
+            assert!(
+                reader
+                    .read_application(TEST_TIMEOUT)
+                    .await
+                    .expect("future update")
+                    .is_empty()
+            );
+            assert_eq!(
+                reader
+                    .read_application(TEST_TIMEOUT)
+                    .await
+                    .expect("future client data")
+                    .plaintext(),
+                b"future client data"
+            );
+            writer
+                .write_application(b"future server data", TEST_TIMEOUT)
+                .await
+                .expect("future requested response");
+            let mut response = read_tls_record(&mut peer, TEST_TIMEOUT)
+                .await
+                .expect("future response")
+                .into_wire();
+            assert_eq!(
+                peer_read
+                    .open_in_place(&mut response)
+                    .expect("current-generation response")
+                    .plaintext(),
+                [24, 0, 0, 1, 0]
+            );
+            peer_read
+                .update_traffic_secret()
+                .expect("future peer read generation");
+            let mut application = read_tls_record(&mut peer, TEST_TIMEOUT)
+                .await
+                .expect("future server application")
+                .into_wire();
+            assert_eq!(
+                peer_read
+                    .open_in_place(&mut application)
+                    .expect("future server data")
+                    .plaintext(),
+                b"future server data"
+            );
+        }
+    }
+
     fn tls_states() -> (EstablishedTls, Tls13RecordLayer, Tls13RecordLayer) {
         let suite = CipherSuite::Aes128GcmSha256;
         let layer = || {
@@ -1244,12 +1601,27 @@ mod tests {
     }
 
     fn handoff_vision_handler(landing_address: std::net::SocketAddr) -> VisionHandler {
+        handoff_vision_handler_with_warm(landing_address, false, FdBudget::new(4_096))
+    }
+
+    fn handoff_vision_handler_with_warm(
+        landing_address: std::net::SocketAddr,
+        warm: bool,
+        budget: FdBudget,
+    ) -> VisionHandler {
+        let policy = WarmConnectionPolicy {
+            min_ready: 1,
+            max_ready: 1,
+            max_connecting: 1,
+            refill_batch: 1,
+            ..WarmConnectionPolicy::default()
+        };
         let barrier = DirectBarrierPolicy {
             max_concurrent: 8,
             max_per_second: 8,
         };
         let landing_public = StaticX25519Key::new(&LANDING_SECRET).public_key();
-        let outbounds = OutboundRegistry::new(
+        let outbounds = OutboundRegistry::with_warm_pools(
             &std::collections::BTreeMap::from([(
                 "handoff".to_owned(),
                 OutboundConfig::Handoff(HandoffOutboundConfig {
@@ -1257,14 +1629,19 @@ mod tests {
                     port: landing_address.port(),
                     psk: SecretString::new(BASE64_URL_SAFE_NO_PAD.encode(PSK)),
                     landing_public_key: BASE64_URL_SAFE_NO_PAD.encode(landing_public),
-                    connect_timeout_ms: Some(1_000),
-                    first_byte_timeout_ms: Some(2_000),
-                    warm_tcp: Some(false),
+                    connect_timeout_ms: Some(if warm { 200 } else { 1_000 }),
+                    first_byte_timeout_ms: Some(if warm { 400 } else { 2_000 }),
+                    warm_tcp: Some(warm),
                 }),
             )]),
-            &barrier,
+            crate::runtime::DirectBarrier::new(&barrier),
             Duration::from_secs(1),
-            FdBudget::new(4_096),
+            budget,
+            &crate::config::node::network::NetworkConfig::default(),
+            crate::network::NetworkEnvironment::detect(),
+            1,
+            WarmPoolAuthority::new(&policy, 1, PressureGauge::new()),
+            &policy,
         );
         let routing = RoutingTable::compile(
             &RoutingConfig {
@@ -1403,20 +1780,79 @@ mod tests {
         run_line_to_landing_full_vision_session(true).await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shared_landing_serves_eight_independent_lines_concurrently() {
+        let listener = Arc::new(
+            TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("shared landing"),
+        );
+        let handler = test_landing_handler();
+        let budget = handler.relay.fd_budget().clone();
+        let mut sessions = tokio::task::JoinSet::new();
+        for index in 0..8 {
+            sessions.spawn(run_shared_landing_session(
+                index % 2 != 0,
+                Arc::clone(&listener),
+                handler.clone(),
+            ));
+        }
+        timeout(Duration::from_secs(10), async {
+            while let Some(result) = sessions.join_next().await {
+                result.expect("every independent LINE must finish byte-exactly");
+            }
+        })
+        .await
+        .expect("shared LANDING fan-in must remain bounded");
+        assert_eq!(
+            handler
+                .governor
+                .in_flight(crate::runtime::AdmissionKind::Handshake),
+            0
+        );
+        assert_eq!(
+            handler
+                .governor
+                .in_flight(crate::runtime::AdmissionKind::PreAuthIdle),
+            0
+        );
+        drop(handler);
+        assert_eq!(
+            budget.in_use(),
+            0,
+            "all session and retained relay resources are released"
+        );
+        assert_eq!(budget.underflows(), 0);
+    }
+
     async fn run_line_to_landing_full_vision_session(consume_cover_shaped_fake_ticket: bool) {
+        let listener = Arc::new(
+            TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("landing must bind"),
+        );
+        run_shared_landing_session(
+            consume_cover_shaped_fake_ticket,
+            listener,
+            test_landing_handler(),
+        )
+        .await;
+    }
+
+    async fn run_shared_landing_session(
+        consume_cover_shaped_fake_ticket: bool,
+        landing_listener: Arc<TcpListener>,
+        landing_handler: HandoffLandingHandler,
+    ) {
         let destination_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .expect("destination must bind");
         let destination_address = destination_listener
             .local_addr()
             .expect("destination address must exist");
-        let landing_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .await
-            .expect("landing must bind");
         let landing_address = landing_listener
             .local_addr()
             .expect("landing address must exist");
-        let landing_handler = test_landing_handler();
         let line_handler = handoff_vision_handler(landing_address);
         let (mut client, server) = tcp_pair().await;
         let (established_tls, mut client_write_records, mut client_read_records) =

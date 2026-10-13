@@ -1,0 +1,14 @@
+{
+  "scenario": "landing_listen_flap_race",
+  "verdict": "PASS",
+  "hypothesis": "LANDING restart/not-listening window while ESTABLISHED may continue",
+  "issue": 253,
+  "stats": {
+    "connect_ok": 324,
+    "post_connect_send_ok": 324,
+    "connect_ECONNREFUSED": 276,
+    "established_send_ok": 4
+  },
+  "connect_total": 600,
+  "refused_ratio": "276/600"
+}

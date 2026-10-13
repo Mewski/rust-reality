@@ -78,12 +78,22 @@ impl WarmPoolAuthority {
             .flatten()
     }
 
+    fn ready_capacity_available(&self) -> bool {
+        self.ready.in_use() < self.ready.inner.capacity
+    }
+
     fn speculative_allowed(&self) -> bool {
         self.pressure.state() == ResourcePressure::Normal
     }
 
-    #[cfg(test)]
-    fn counts(&self) -> (u64, u64) {
+    pub(crate) fn capacity(&self) -> u64 {
+        self.ready
+            .inner
+            .capacity
+            .saturating_add(self.connecting.inner.capacity)
+    }
+
+    pub(crate) fn counts(&self) -> (u64, u64) {
         (self.ready.in_use(), self.connecting.in_use())
     }
 }
@@ -180,6 +190,8 @@ struct PoolInner {
     state: Mutex<PoolState>,
     notify: Notify,
     metrics: PoolMetrics,
+    #[cfg(test)]
+    before_wait: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -219,7 +231,9 @@ struct PoolState {
     last_tick: Instant,
     last_demand: Instant,
     failure_streak: u32,
+    failures: DialFailureCounts,
     backoff_until: Option<Instant>,
+    pressure_resume_at: Option<Instant>,
 }
 
 struct ReadySocket {
@@ -227,6 +241,35 @@ struct ReadySocket {
     _ready_permit: CounterPermit,
     connected_at: Instant,
     idle_since: Instant,
+}
+
+/// Fixed-cardinality dial outcomes, updated under the existing pool lock.
+/// No peer identity, error text, allocation, or additional lock is retained.
+#[derive(Clone, Copy, Default)]
+struct DialFailureCounts {
+    timeout: u64,
+    resource: u64,
+    policy: u64,
+    io: u64,
+}
+
+impl DialFailureCounts {
+    fn record(&mut self, error: &DestinationConnectError) {
+        let count = match error {
+            DestinationConnectError::TimedOut { .. } => &mut self.timeout,
+            DestinationConnectError::DescriptorBudget | DestinationConnectError::Allocation => {
+                &mut self.resource
+            }
+            DestinationConnectError::NoAddressesForPolicy
+            | DestinationConnectError::TooManyResolvedAddresses => &mut self.policy,
+            DestinationConnectError::Io(error) => match error.kind() {
+                std::io::ErrorKind::TimedOut => &mut self.timeout,
+                std::io::ErrorKind::OutOfMemory => &mut self.resource,
+                _ => &mut self.io,
+            },
+        };
+        *count = count.saturating_add(1);
+    }
 }
 
 #[derive(Default)]
@@ -258,6 +301,12 @@ pub(crate) struct WarmPoolSnapshot {
     pub(crate) checkout_miss: u64,
     pub(crate) cold_fallback: u64,
     pub(crate) connect_failure: u64,
+    pub(crate) connect_timeout: u64,
+    pub(crate) connect_resource: u64,
+    pub(crate) connect_policy: u64,
+    pub(crate) connect_io: u64,
+    pub(crate) failure_streak: u32,
+    pub(crate) backoff_remaining_ms: u64,
     pub(crate) stale_discard: u64,
     pub(crate) refill: u64,
     pub(crate) target_ready: u32,
@@ -335,13 +384,17 @@ impl AdaptiveTcpPool {
                     last_tick: now,
                     last_demand: now,
                     failure_streak: 0,
+                    failures: DialFailureCounts::default(),
                     backoff_until: None,
+                    pressure_resume_at: None,
                 }),
                 notify: Notify::new(),
                 metrics: PoolMetrics {
                     target_ready: AtomicU32::new(policy.min_ready),
                     ..PoolMetrics::default()
                 },
+                #[cfg(test)]
+                before_wait: Mutex::new(None),
             }),
         }
     }
@@ -479,6 +532,19 @@ impl AdaptiveTcpPool {
             checkout_miss: self.inner.metrics.checkout_miss.load(Ordering::Relaxed),
             cold_fallback: self.inner.metrics.cold_fallback.load(Ordering::Relaxed),
             connect_failure: self.inner.metrics.connect_failure.load(Ordering::Relaxed),
+            connect_timeout: state.failures.timeout,
+            connect_resource: state.failures.resource,
+            connect_policy: state.failures.policy,
+            connect_io: state.failures.io,
+            failure_streak: state.failure_streak,
+            backoff_remaining_ms: state.backoff_until.map_or(0, |deadline| {
+                u64::try_from(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .as_millis(),
+                )
+                .unwrap_or(u64::MAX)
+            }),
             stale_discard: self.inner.metrics.stale_discard.load(Ordering::Relaxed),
             refill: self.inner.metrics.refill.load(Ordering::Relaxed),
             target_ready: self.inner.metrics.target_ready.load(Ordering::Acquire),
@@ -527,9 +593,21 @@ async fn run_controller(inner: Arc<PoolInner>) {
             break;
         }
         reconcile(&inner, &mut dials);
+        #[cfg(test)]
+        if let Some(before_wait) = lock(&inner.before_wait).take() {
+            before_wait();
+        }
+        let notified = inner.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        // A retirement broadcast stores no permit. Recheck after registering
+        // so shutdown never depends on a later dial or maintenance deadline.
+        if inner.lifecycle.load(Ordering::Acquire) != LIFECYCLE_ACTIVE {
+            break;
+        }
         tokio::select! {
             biased;
-            _ = inner.notify.notified() => {
+            _ = &mut notified => {
                 let now = Instant::now();
                 adjust_if_due(&inner, now);
                 maintenance.as_mut().reset(next_maintenance_deadline(&inner, now));
@@ -579,7 +657,22 @@ fn cancel_speculative_dials(inner: &PoolInner, dials: &mut FuturesUnordered<Dial
     dials.clear();
     let mut state = lock(&inner.state);
     state.connecting = 0;
+    defer_pressure_refill(&mut state, Instant::now());
     inner.metrics.connecting.store(0, Ordering::Release);
+}
+
+// Shedding speculative resources can itself clear FD hysteresis. Do not let
+// that self-induced transition immediately start the same speculative work.
+// This runs only on the pool controller, under its existing state lock.
+fn defer_pressure_refill(state: &mut PoolState, now: Instant) {
+    let until = now + BASE_BACKOFF;
+    // A successful concurrent dial may clear failure backoff, but must not
+    // erase a pressure cooldown caused by another dial's released permit.
+    state.pressure_resume_at = Some(
+        state
+            .pressure_resume_at
+            .map_or(until, |current| current.max(until)),
+    );
 }
 
 /// Schedules only work that can change state. A stable minimum pool wakes for
@@ -599,7 +692,7 @@ fn next_maintenance_deadline(inner: &PoolInner, now: Instant) -> Instant {
             shrink_at
         });
     }
-    if let Some(backoff_until) = state.backoff_until {
+    if let Some(backoff_until) = state.backoff_until.max(state.pressure_resume_at) {
         next = next.min(backoff_until.max(now + Duration::from_millis(1)));
     }
     for ready in &state.ready {
@@ -623,6 +716,7 @@ fn prune_and_adjust(inner: &Arc<PoolInner>, now: Instant) {
     let before = state.ready.len();
     let mut expired = 0_usize;
     if pressure {
+        defer_pressure_refill(&mut state, now);
         state.ready.clear();
     } else {
         state.ready.retain(|ready| {
@@ -710,15 +804,24 @@ fn reconcile(inner: &Arc<PoolInner>, dials: &mut FuturesUnordered<DialFuture>) {
     if inner.lifecycle.load(Ordering::Acquire) != LIFECYCLE_ACTIVE
         || inner.fd_budget.pressure() != FdPressure::Normal
         || !inner.authority.speculative_allowed()
+        // Hot reload can add pools without increasing process-lifetime limits.
+        // Do not establish sockets that cannot enter any ready slot. Capacity
+        // may race with an in-flight dial; completion still owns admission.
+        || !inner.authority.ready_capacity_available()
     {
         return;
     }
     let now = Instant::now();
     let mut state = lock(&inner.state);
-    if state.backoff_until.is_some_and(|deadline| deadline > now) {
+    if state
+        .backoff_until
+        .max(state.pressure_resume_at)
+        .is_some_and(|deadline| deadline > now)
+    {
         return;
     }
     state.backoff_until = None;
+    state.pressure_resume_at = None;
     let occupied = saturating_u32(state.ready.len()).saturating_add(state.connecting);
     let deficit = state.target_ready.saturating_sub(occupied);
     let local_slots = inner.policy.max_connecting.saturating_sub(state.connecting);
@@ -787,8 +890,18 @@ fn handle_dial_completion(inner: &Arc<PoolInner>, outcome: DialOutcome) {
                 .ready
                 .store(saturating_u32(state.ready.len()), Ordering::Release);
         }
-        Ok(_) => {}
-        Err(_) => record_dial_failure(inner, &mut state, now),
+        Ok(connection) => {
+            // Observe pressure before dropping the connection releases its FD
+            // permit; otherwise this controller can erase its own signal.
+            if inner.fd_budget.pressure() != FdPressure::Normal {
+                defer_pressure_refill(&mut state, now);
+            }
+            drop(connection);
+        }
+        Err(error) => {
+            state.failures.record(&error);
+            record_dial_failure(inner, &mut state, now);
+        }
     }
 }
 
@@ -860,8 +973,10 @@ mod tests {
     use crate::config::node::network::NetworkConfig;
     use crate::runtime::policy::WarmConnectionPolicy;
     use std::{
+        future::Future,
         net::Ipv4Addr,
         sync::{Arc, Mutex},
+        task::{Context, Waker},
         time::Duration,
     };
 
@@ -872,7 +987,7 @@ mod tests {
         network::NetworkEnvironment,
         runtime::{PressureGauge, ResourcePressure},
         server::connector::DestinationConnector,
-        transport::FdBudget,
+        transport::{FdBudget, FdPressure},
     };
 
     struct CoverFixture {
@@ -933,6 +1048,45 @@ mod tests {
             max_lifetime_ms: 1_000,
             shrink_delay_ms: 200,
         }
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn controller_retirement_before_notification_registration_is_immediate() {
+        let policy = policy();
+        let pressure = PressureGauge::new();
+        pressure.set(ResourcePressure::Critical);
+        let authority = WarmPoolAuthority::new(&policy, 1, pressure);
+        let controller = AdaptiveTcpPool::new(
+            Arc::from("127.0.0.1:1"),
+            91,
+            DestinationConnector::with_environment(
+                Duration::from_millis(500),
+                NetworkConfig::default(),
+                NetworkEnvironment::detect(),
+            ),
+            FdBudget::new(64),
+            authority,
+            &policy,
+        );
+        controller.inner.lifecycle.store(
+            super::LIFECYCLE_ACTIVE,
+            std::sync::atomic::Ordering::Release,
+        );
+        let retired = Arc::downgrade(&controller.inner);
+        let retiring_controller = controller.clone();
+        *super::lock(&controller.inner.before_wait) = Some(Box::new(move || {
+            assert!(retiring_controller.deactivate());
+        }));
+        let mut task = Box::pin(super::run_controller(Arc::clone(&controller.inner)));
+        drop(controller);
+
+        assert!(
+            task.as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_ready(),
+            "retirement must not wait for the 30-second maintenance timer"
+        );
+        assert!(retired.upgrade().is_none());
     }
 
     fn pool(
@@ -1181,6 +1335,76 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn fd_pressure_reclaims_ready_permits_and_recovers() {
+        let fixture = CoverFixture::start().await;
+        let policy = policy();
+        let authority = WarmPoolAuthority::new(&policy, 1, PressureGauge::new());
+        let fd_budget = FdBudget::new(64);
+        let pool = pool(&fixture, 61, &policy, authority.clone(), fd_budget.clone());
+        {
+            let now = time::Instant::now();
+            let later = now + Duration::from_secs(3);
+            let mut state = super::lock(&pool.inner.state);
+            state.backoff_until = Some(later);
+            super::defer_pressure_refill(&mut state, now);
+            assert_eq!(state.backoff_until, Some(later));
+            assert_eq!(state.pressure_resume_at, Some(now + super::BASE_BACKOFF));
+            // Success resets only network-failure backoff, not pressure.
+            state.backoff_until = None;
+            assert!(state.pressure_resume_at.is_some());
+            state.pressure_resume_at = None;
+        }
+        assert!(pool.activate());
+        wait_for(|| pool.snapshot().ready == policy.min_ready).await;
+
+        // External holders keep pressure above the low watermark even after
+        // the pool sheds its own ready sockets. No async interleaving here.
+        let mut held = Vec::new();
+        while fd_budget.pressure() == FdPressure::Normal {
+            held.push(fd_budget.try_acquire(1).expect("budget below capacity"));
+        }
+        assert_eq!(fd_budget.pressure(), FdPressure::High);
+        wait_for(|| pool.snapshot().ready == 0 && pool.snapshot().connecting == 0).await;
+        wait_for(|| authority.counts() == (0, 0)).await;
+        assert_eq!(fd_budget.in_use(), held.len() as u64);
+
+        drop(held);
+        wait_for(|| fd_budget.pressure() == FdPressure::Normal).await;
+        wait_for(|| pool.snapshot().ready == policy.min_ready).await;
+        pool.deactivate();
+        wait_for(|| authority.counts() == (0, 0) && fd_budget.in_use() == 0).await;
+        assert_eq!(fd_budget.underflows(), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fd_pressure_backoff_bounds_refill_churn() {
+        let fixture = CoverFixture::start().await;
+        let policy = policy();
+        let authority = WarmPoolAuthority::new(&policy, 1, PressureGauge::new());
+        let budget = FdBudget::new(16);
+        let pool = pool(&fixture, 62, &policy, authority.clone(), budget.clone());
+        assert!(pool.activate());
+        wait_for(|| pool.snapshot().ready == policy.min_ready).await;
+        let initial = pool.snapshot().refill;
+        let held = budget.try_acquire(13).expect("external pressure units");
+        let began = time::Instant::now();
+        time::sleep(Duration::from_millis(200)).await;
+        let elapsed = began.elapsed();
+        let refills = pool.snapshot().refill - initial;
+        let limit = (elapsed.as_millis() / super::BASE_BACKOFF.as_millis() + 2)
+            * u128::from(policy.refill_batch);
+        eprintln!("pressure churn: {refills} refills in {elapsed:?}, limit {limit}");
+        drop(held);
+        pool.deactivate();
+        wait_for(|| authority.counts() == (0, 0) && budget.in_use() == 0).await;
+        assert_eq!(budget.underflows(), 0);
+        assert!(
+            u128::from(refills) <= limit,
+            "pressure must not cause a refill storm"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn expiry_and_generation_shutdown_release_speculative_resources() {
         let fixture = CoverFixture::start().await;
         let mut policy = policy();
@@ -1234,6 +1458,12 @@ mod tests {
         time::sleep(Duration::from_millis(350)).await;
         let failed = pool.snapshot();
         assert!(failed.connect_failure >= 1);
+        assert_eq!(failed.connect_io, failed.connect_failure);
+        assert_eq!(
+            failed.connect_timeout + failed.connect_resource + failed.connect_policy,
+            0
+        );
+        assert!(failed.failure_streak > 0);
         assert!(
             failed.refill <= 3,
             "exponential backoff must prevent a tight speculative dial loop"
@@ -1248,8 +1478,223 @@ mod tests {
             .await
             .expect("cover accept task must not panic")
             .expect("recovered cover must accept");
-        assert_eq!(pool.snapshot().ready, 1);
+        let recovered = pool.snapshot();
+        assert_eq!(recovered.ready, 1);
+        assert_eq!(recovered.failure_streak, 0);
+        assert_eq!(recovered.backoff_remaining_ms, 0);
+        assert!(recovered.connect_io >= failed.connect_io);
         pool.deactivate();
         drop(accepted);
+    }
+
+    /// M1 — Listener unavailable while established sessions survive.
+    ///
+    /// Closing only the listening socket (process still "alive", accepted FD
+    /// retained) refuses NEW dials with ECONNREFUSED while an already-accepted
+    /// session can still exchange bytes. This is the OS-level shape behind
+    /// hypothesis H1 / #253 "new fail, old may work", and discriminates from
+    /// full peer teardown (see sibling test).
+    #[tokio::test]
+    async fn listen_unavailable_established_survives_new_dials_refuse() {
+        use tokio::io::AsyncReadExt;
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("listener must bind");
+        let addr = listener.local_addr().expect("listener address");
+        let mut established = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("established dial");
+        let (mut peer, _) = listener.accept().await.expect("accept established");
+        // Drop listen only — analogue of bind flap / stop-listen without exit.
+        drop(listener);
+
+        established
+            .write_all(b"ping")
+            .await
+            .expect("established write must succeed while peer FD lives");
+        let mut buf = [0u8; 4];
+        peer.read_exact(&mut buf)
+            .await
+            .expect("peer must still receive");
+        assert_eq!(&buf, b"ping");
+
+        let err = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect_err("new dial must be refused while listener is down");
+        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionRefused);
+        assert_eq!(
+            err.raw_os_error(),
+            Some(111),
+            "Linux ECONNREFUSED errno must be 111"
+        );
+    }
+
+    /// M2 — Full peer teardown (process-restart analogue) kills established.
+    ///
+    /// Dropping the accepted peer FD (as process exit closes all FDs) makes
+    /// the established side observe FIN/RST; new dials also refuse while the
+    /// endpoint is down. Operators: if established sessions ALSO die when new
+    /// dials refuse, prefer M2 (restart/crash) over M1 (listen-only flap).
+    #[tokio::test]
+    async fn peer_teardown_terminates_established_and_new_dials_refuse() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("listener must bind");
+        let addr = listener.local_addr().expect("listener address");
+        let established = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("established dial");
+        let (peer, _) = listener.accept().await.expect("accept established");
+        drop(listener);
+        drop(peer); // process-exit analogue for this accepted socket
+
+        // Wait for FIN/RST without a fixed sleep race: poll try_read until
+        // closed/reset, or fall back to a write that must fail.
+        let mut established = established;
+        let deadline = time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let mut buf = [0u8; 8];
+            match established.try_read(&mut buf) {
+                Ok(0) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if time::Instant::now() >= deadline {
+                        let write = established.write_all(b"x").await;
+                        assert!(
+                            write.is_err(),
+                            "established write must fail after peer teardown, got {write:?}"
+                        );
+                        break;
+                    }
+                    time::sleep(Duration::from_millis(10)).await;
+                }
+                other => panic!("expected FIN/RST after peer teardown, got {other:?}"),
+            }
+        }
+
+        let err = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect_err("new dial must be refused while endpoint is down");
+        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionRefused);
+    }
+
+    #[test]
+    fn dial_failure_counts_are_bounded_typed_and_saturating() {
+        use super::{DestinationConnectError, DialFailureCounts};
+        use std::io;
+
+        let mut counts = DialFailureCounts::default();
+        for error in [
+            DestinationConnectError::TimedOut {
+                timeout: Duration::from_secs(1),
+            },
+            DestinationConnectError::Io(io::Error::from(io::ErrorKind::TimedOut)),
+            DestinationConnectError::DescriptorBudget,
+            DestinationConnectError::Allocation,
+            DestinationConnectError::Io(io::Error::from(io::ErrorKind::OutOfMemory)),
+            DestinationConnectError::NoAddressesForPolicy,
+            DestinationConnectError::TooManyResolvedAddresses,
+            DestinationConnectError::Io(io::Error::new(
+                io::ErrorKind::ConnectionRefused,
+                "secret endpoint must not be retained",
+            )),
+        ] {
+            counts.record(&error);
+        }
+        assert_eq!(
+            (counts.timeout, counts.resource, counts.policy, counts.io),
+            (2, 3, 2, 1)
+        );
+        counts.io = u64::MAX;
+        counts.record(&DestinationConnectError::Io(io::Error::other("private")));
+        assert_eq!(counts.io, u64::MAX);
+    }
+
+    #[test]
+    fn cancelled_unpolled_dials_release_permits_and_clear_gauges() {
+        use futures_util::stream::FuturesUnordered;
+        use std::sync::atomic::Ordering;
+
+        let policy = policy();
+        let authority = WarmPoolAuthority::new(&policy, 1, PressureGauge::new());
+        let pool = AdaptiveTcpPool::new(
+            Arc::from("127.0.0.1:1"),
+            97,
+            DestinationConnector::new(Duration::from_millis(100)),
+            FdBudget::new(64),
+            authority.clone(),
+            &policy,
+        );
+        // Own the permit before constructing a future that is never polled.
+        let permit = authority
+            .try_connecting()
+            .expect("permit must be available");
+        let mut dials: FuturesUnordered<super::DialFuture> = FuturesUnordered::new();
+        dials.push(Box::pin(async move {
+            let _permit = permit;
+            std::future::pending::<super::DialOutcome>().await
+        }));
+        super::lock(&pool.inner.state).connecting = 1;
+        pool.inner.metrics.connecting.store(1, Ordering::Release);
+        assert_eq!(authority.counts(), (0, 1));
+        for _ in 0..2 {
+            super::cancel_speculative_dials(&pool.inner, &mut dials);
+            assert!(dials.is_empty());
+            assert_eq!(super::lock(&pool.inner.state).connecting, 0);
+            assert_eq!(pool.inner.metrics.connecting.load(Ordering::Acquire), 0);
+            assert_eq!(authority.counts(), (0, 0));
+            assert_eq!(pool.snapshot().connect_failure, 0);
+        }
+    }
+
+    #[test]
+    fn global_ready_saturation_defers_speculative_dials_until_capacity_returns() {
+        use futures_util::stream::FuturesUnordered;
+        use std::sync::atomic::Ordering;
+
+        let mut policy = policy();
+        policy.min_ready = 1;
+        policy.max_ready = 1;
+        policy.max_connecting = 1;
+        policy.refill_batch = 1;
+        // Startup authority can be shared by more warm outbounds after reload.
+        let authority = WarmPoolAuthority::new(&policy, 1, PressureGauge::new());
+        let occupied = authority
+            .try_ready()
+            .expect("existing pool owns ready capacity");
+        let pool = AdaptiveTcpPool::new(
+            Arc::from("127.0.0.1:1"),
+            98,
+            DestinationConnector::new(Duration::from_millis(100)),
+            FdBudget::new(64),
+            authority.clone(),
+            &policy,
+        );
+        // Exercise scheduling without spawning a controller or polling network I/O.
+        pool.inner
+            .lifecycle
+            .store(super::LIFECYCLE_ACTIVE, Ordering::Release);
+        let mut dials: FuturesUnordered<super::DialFuture> = FuturesUnordered::new();
+        for _ in 0..20 {
+            super::reconcile(&pool.inner, &mut dials);
+            assert!(
+                dials.is_empty(),
+                "full ready capacity must not cause pointless dials"
+            );
+        }
+        assert_eq!(pool.snapshot().refill, 0);
+        assert_eq!(authority.counts(), (1, 0));
+        drop(occupied);
+        super::reconcile(&pool.inner, &mut dials);
+        assert_eq!(
+            dials.len(),
+            1,
+            "normal reconciliation resumes after capacity returns"
+        );
+        assert_eq!(authority.counts(), (0, 1));
+        super::cancel_speculative_dials(&pool.inner, &mut dials);
+        pool.deactivate();
+        assert_eq!(authority.counts(), (0, 0));
     }
 }

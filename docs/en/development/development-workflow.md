@@ -10,7 +10,9 @@ that also bind agents see [AGENTS.md](../../../AGENTS.md).
 
 Use the toolchain pinned by [`rust-toolchain.toml`](../../../rust-toolchain.toml).
 The canonical developer interface is `cargo dev` (the `rr-dev` binary in the
-independent `tools/` workspace, exposed through a root cargo alias):
+independent `tools/` workspace, exposed through a root cargo alias that runs
+`cargo run --locked` against `tools/Cargo.toml`; see
+[ADR 0056](../../adr/0056-cargo-dev-alias-uses-locked.md)):
 
 ```shell
 cargo dev --help        # discover the command groups
@@ -32,6 +34,13 @@ cargo build --release --locked          # release profile (thin LTO, codegen-uni
 
 Match validation depth to the change. Do not run the full gate after every edit;
 never merge on focused tests alone.
+
+GitHub Actions is the primary merge-quality gate at the exact candidate SHA.
+Local tests provide fast development feedback. If a demonstrated sandbox
+capability restriction prevents local execution, retain that failure and its
+reproducer, and require the unmodified full suite in GitHub Actions. Do not
+skip tests or treat unexplained/supported-environment failures as exemptions.
+The policy and evidence requirements are [ADR 0038](../../adr/0038-hosted-actions-are-primary-quality-gates.md).
 
 1. **While editing:** focused unit/module tests
    (`cargo test -p rust-reality <module>` or the rr-dev equivalent).
@@ -64,8 +73,13 @@ benchmark and interoperability authority. `cargo deny`, `cargo audit` and
 policy exist for the shipped binary, whose dependency graph the tooling
 workspace is deliberately kept out of.
 
-CI runs the same one gate plus the musl release build; the Security workflow
-adds fuzz shards and sanitizers.
+CI runs the same gate, the musl release build, and the AArch64 cross build.
+A separate native AArch64 job checks out the exact proposed commit, runs the
+release-tier tests/build, and packages and executes that tier's smoke test.
+Its Actions artifact is candidate evidence: the current Cargo version is only
+the package-format label, and no tag or GitHub Release is created. Official
+publication still follows the [release process](../release-process.md).
+The Security workflow adds fuzz shards and sanitizers.
 
 ### Check result protocol
 

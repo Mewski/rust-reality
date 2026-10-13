@@ -174,6 +174,10 @@ impl RuntimeSnapshot {
             tag: Arc::from(config.role().as_str()),
             governor: authorities.governor.clone(),
             handler,
+            _retirement: GenerationRetirement {
+                generation,
+                logger: logger.clone(),
+            },
         });
         let mut connections = HashMap::new();
         let bound: Vec<SocketAddr> = config
@@ -218,7 +222,7 @@ impl RuntimeSnapshot {
             emit(
                 &self.logger,
                 &LogEvent::TransportPoolSummary {
-                    transport: snapshot.transport,
+                    transport: snapshot.transport.as_str(),
                     generation: pool.generation,
                     pool_ready: pool.ready,
                     pool_connecting: pool.connecting,
@@ -228,6 +232,12 @@ impl RuntimeSnapshot {
                     pool_checkout_miss: pool.checkout_miss,
                     pool_cold_fallback: pool.cold_fallback,
                     pool_connect_failure: pool.connect_failure,
+                    pool_connect_timeout: pool.connect_timeout,
+                    pool_connect_resource: pool.connect_resource,
+                    pool_connect_policy: pool.connect_policy,
+                    pool_connect_io: pool.connect_io,
+                    pool_failure_streak: pool.failure_streak,
+                    pool_backoff_remaining_ms: pool.backoff_remaining_ms,
                     pool_stale_discard: pool.stale_discard,
                     pool_refill: pool.refill,
                     pool_target_ready: pool.target_ready,
@@ -257,6 +267,12 @@ impl RuntimeSnapshot {
                             pool_checkout_miss: snapshot.checkout_miss,
                             pool_cold_fallback: snapshot.cold_fallback,
                             pool_connect_failure: snapshot.connect_failure,
+                            pool_connect_timeout: snapshot.connect_timeout,
+                            pool_connect_resource: snapshot.connect_resource,
+                            pool_connect_policy: snapshot.connect_policy,
+                            pool_connect_io: snapshot.connect_io,
+                            pool_failure_streak: snapshot.failure_streak,
+                            pool_backoff_remaining_ms: snapshot.backoff_remaining_ms,
                             pool_stale_discard: snapshot.stale_discard,
                             pool_refill: snapshot.refill,
                             pool_target_ready: snapshot.target_ready,
@@ -296,6 +312,27 @@ pub(super) struct ConnectionRuntime {
     pub(super) tag: Arc<str>,
     pub(super) governor: ResourceGovernor,
     pub(super) handler: ConnectionHandler,
+    // Declared last so the event follows handler destruction. Connections keep
+    // this Arc after releasing the configuration snapshot that selected it.
+    _retirement: GenerationRetirement,
+}
+
+struct GenerationRetirement {
+    generation: u64,
+    logger: Logger,
+}
+
+impl Drop for GenerationRetirement {
+    fn drop(&mut self) {
+        if self.logger.debug_enabled() {
+            emit(
+                &self.logger,
+                &LogEvent::GenerationRetired {
+                    generation: self.generation,
+                },
+            );
+        }
+    }
 }
 
 pub(super) enum ConnectionHandler {

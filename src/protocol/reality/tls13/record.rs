@@ -118,6 +118,8 @@ pub enum Tls13RecordError {
     InvalidContentType,
     /// This key reached its conservative per-key record usage limit.
     KeyUsageExhausted,
+    /// Ciphertext delivery was interrupted, so this direction cannot be resumed.
+    WriteFailed,
     /// Reserving the bounded output buffer failed.
     BufferAllocation,
 }
@@ -398,6 +400,9 @@ pub struct Tls13RecordLayer {
     iv: Zeroizing<[u8; NONCE_LEN]>,
     traffic: TrafficState,
     sequence: u64,
+    write_failed: bool,
+    #[cfg(test)]
+    test_key_usage_limit: Option<u64>,
 }
 
 enum TrafficState {
@@ -419,6 +424,9 @@ impl Tls13RecordLayer {
             iv: Zeroizing::new(*keys.iv()),
             traffic: TrafficState::Handshake,
             sequence: 0,
+            write_failed: false,
+            #[cfg(test)]
+            test_key_usage_limit: None,
         })
     }
 
@@ -441,6 +449,9 @@ impl Tls13RecordLayer {
             iv: Zeroizing::new(*keys.iv()),
             traffic: TrafficState::Application(traffic_secret),
             sequence: 0,
+            write_failed: false,
+            #[cfg(test)]
+            test_key_usage_limit: None,
         })
     }
 
@@ -460,6 +471,26 @@ impl Tls13RecordLayer {
         self.sequence >= self.key_usage_limit() - 1
     }
 
+    /// Permanently rejects a direction whose sealed ciphertext was not delivered.
+    pub(crate) fn fail_write(&mut self) {
+        self.write_failed = true;
+    }
+
+    pub(crate) const fn ensure_write_ready(&self) -> Result<(), Tls13RecordError> {
+        if self.write_failed {
+            Err(Tls13RecordError::WriteFailed)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Lowers the record budget without skipping sequences or changing secrets.
+    #[cfg(test)]
+    pub(crate) fn set_test_key_usage_limit(&mut self, limit: u64) {
+        assert!(limit >= 2 && limit <= self.key_usage_limit());
+        self.test_key_usage_limit = Some(limit);
+    }
+
     /// Atomically advances an application layer to its next traffic secret.
     ///
     /// The next secret, key, IV, and cipher are all constructed before any live
@@ -472,6 +503,7 @@ impl Tls13RecordLayer {
     /// Rejects handshake-only layers and traffic-secret derivation or cipher
     /// initialization failures.
     pub fn update_traffic_secret(&mut self) -> Result<(), Tls13RecordError> {
+        self.ensure_write_ready()?;
         let current = match &self.traffic {
             TrafficState::Application(secret) => secret,
             TrafficState::Handshake => return Err(Tls13RecordError::KeyUpdateUnavailable),
@@ -497,8 +529,9 @@ impl Tls13RecordLayer {
     ///
     /// # Errors
     ///
-    /// Rejects a handshake-only layer, which has no application traffic secret.
+    /// Rejects handshake-only layers and directions with ambiguous ciphertext delivery.
     pub fn into_exported_state(self) -> Result<ExportedRecordState, Tls13RecordError> {
+        self.ensure_write_ready()?;
         let traffic_secret = match self.traffic {
             TrafficState::Application(secret) => secret,
             TrafficState::Handshake => return Err(Tls13RecordError::KeyUpdateUnavailable),
@@ -783,6 +816,10 @@ impl Tls13RecordLayer {
     }
 
     const fn key_usage_limit(&self) -> u64 {
+        #[cfg(test)]
+        if let Some(limit) = self.test_key_usage_limit {
+            return limit;
+        }
         match self.suite {
             CipherSuite::Aes128GcmSha256 | CipherSuite::Aes256GcmSha384 => AES_GCM_RECORD_LIMIT,
             CipherSuite::ChaCha20Poly1305Sha256 => CHACHA20_POLY1305_RECORD_LIMIT,
@@ -790,6 +827,7 @@ impl Tls13RecordLayer {
     }
 
     fn ensure_key_available(&self) -> Result<(), Tls13RecordError> {
+        self.ensure_write_ready()?;
         let available = self.sequence < self.key_usage_limit();
         if available {
             Ok(())

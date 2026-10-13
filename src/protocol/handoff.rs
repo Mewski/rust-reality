@@ -54,8 +54,8 @@ use crate::crypto::{EphemeralX25519Key, StaticX25519Key};
 /// Handoff wire protocol version carried in the fixed header.
 pub const HANDOFF_PROTOCOL_VERSION: u8 = 1;
 
-/// Continuation-state blob version carried in the header and repeated inside
-/// the sealed blob.
+/// Current continuation-state blob version, carried in the header and repeated
+/// inside the sealed blob. Version 1 is rejected; it cannot retain KeyUpdate state.
 pub const CONTINUATION_STATE_VERSION: u8 = 2;
 
 const MAGIC: [u8; 4] = *b"HND1";
@@ -636,8 +636,11 @@ impl HandoffReplayCache {
         }
     }
 
-    #[cfg(test)]
-    fn entry_count(&self) -> usize {
+    pub(crate) fn retention_policy(&self) -> (usize, Duration) {
+        (self.inner.capacity, self.inner.retention)
+    }
+
+    pub(crate) fn entry_count(&self) -> usize {
         self.inner.used.load(Ordering::Acquire)
     }
 }
@@ -1248,6 +1251,11 @@ pub fn fuzz_decode_blob(blob: &[u8]) -> Result<ContinuationState, HandoffError> 
 mod tests {
     use std::time::Duration;
 
+    use chacha20poly1305::{
+        ChaCha20Poly1305, KeyInit,
+        aead::{AeadInOut, array::Array},
+    };
+
     use sha2::{Digest as _, Sha256};
     use x25519_dalek::{PublicKey, StaticSecret};
 
@@ -1533,20 +1541,80 @@ mod tests {
         let state = test_state(Vec::new(), Vec::new());
         let message = seal(&state, &psk, &landing_public);
 
-        for offset in [4_usize, 5] {
-            let mut tampered = message.clone();
-            tampered[offset] = tampered[offset].wrapping_add(1);
-            assert_eq!(
-                open_error(&tampered, &psk, &landing_secret, &test_cache(), NOW),
-                HandoffError::Version
-            );
-            assert_eq!(
-                message_len_from_header(&tampered[..HEADER_LEN]),
-                Err(HandoffError::Version)
-            );
+        for (offset, versions) in [(4_usize, [0, 2, 255]), (5, [0, 1, 3])] {
+            for version in versions {
+                let mut tampered = message.clone();
+                tampered[offset] = version;
+                let cache = test_cache();
+                assert_eq!(
+                    open_error(&tampered, &psk, &landing_secret, &cache, NOW),
+                    HandoffError::Version
+                );
+                assert_eq!(
+                    message_len_from_header(&tampered[..HEADER_LEN]),
+                    Err(HandoffError::Version)
+                );
+                assert_eq!(cache.entry_count(), 0, "version rejection precedes replay");
+            }
         }
         assert_eq!(HANDOFF_PROTOCOL_VERSION, 1);
         assert_eq!(CONTINUATION_STATE_VERSION, 2);
+    }
+
+    #[test]
+    fn v1_blob_is_rejected_before_parsing_any_legacy_fields() {
+        // The authenticated inner version has its own consistency check.
+        // Even a version-only v1 blob fails as State, not Length, without
+        // interpreting derived keys/IVs as a v2 generation secret.
+        assert_eq!(decode_blob(&[1]).unwrap_err(), HandoffError::State);
+        let mut blob = Vec::new();
+        encode_blob(&test_state(Vec::new(), Vec::new()), &mut blob).expect("v2 blob");
+        blob[0] = 1;
+        assert_eq!(decode_blob(&blob).unwrap_err(), HandoffError::State);
+    }
+
+    #[test]
+    fn authenticated_v1_inner_blob_is_rejected_as_invalid_state() {
+        let (landing_secret, landing_public) = landing_key_pair(0x7f);
+        let psk = HandoffPsk::new([0x55; 32]);
+        let mut message = seal(&test_state(Vec::new(), Vec::new()), &psk, &landing_public);
+        let header: [u8; HEADER_LEN] = message[..HEADER_LEN].try_into().expect("fixed header");
+        let ephemeral: [u8; 32] = message[30..62].try_into().expect("ephemeral public");
+        let shared = StaticX25519Key::new(&landing_secret)
+            .agree(&ephemeral)
+            .expect("shared key");
+        let (key, nonce) = super::derive_aead(&header, &shared, &psk, &landing_public)
+            .expect("transfer AEAD material");
+        let cipher = ChaCha20Poly1305::new_from_slice(key.as_slice()).expect("transfer cipher");
+        let body_end = message.len() - 16;
+        let tag: [u8; 16] = message[body_end..].try_into().expect("detached tag");
+        cipher
+            .decrypt_inout_detached(
+                &Array(*nonce),
+                &header,
+                (&mut message[HEADER_LEN..body_end]).into(),
+                &Array(tag),
+            )
+            .expect("valid transfer must authenticate");
+        message[HEADER_LEN] = 1;
+        let tag = cipher
+            .encrypt_inout_detached(
+                &Array(*nonce),
+                &header,
+                (&mut message[HEADER_LEN..body_end]).into(),
+            )
+            .expect("seal inconsistent inner version");
+        message[body_end..].copy_from_slice(&tag);
+        let cache = test_cache();
+        assert_eq!(
+            open_error(&message, &psk, &landing_secret, &cache, NOW),
+            HandoffError::State
+        );
+        assert_eq!(
+            cache.entry_count(),
+            1,
+            "inner version is checked after authentication"
+        );
     }
 
     #[test]

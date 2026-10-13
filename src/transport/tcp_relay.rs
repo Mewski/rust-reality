@@ -81,6 +81,25 @@ pub struct TcpRelay {
     fd_budget: FdBudget,
 }
 
+/// Owns the sockets until the relay future settles. Cancellation must never
+/// manufacture a clean short EOF; Drop runs before either descriptor closes.
+/// Owning the streams (rather than caching raw descriptor numbers) also makes
+/// recycled-descriptor resets impossible.
+struct OwnedRelaySockets {
+    inbound: TcpStream,
+    outbound: TcpStream,
+    completed: bool,
+}
+
+impl Drop for OwnedRelaySockets {
+    fn drop(&mut self) {
+        if !self.completed {
+            let _ignored = rr_linux::socket::abort_linger(&self.inbound);
+            let _ignored = rr_linux::socket::abort_linger(&self.outbound);
+        }
+    }
+}
+
 impl TcpRelay {
     /// Compiles immutable relay settings and pre-reserves all pool metadata.
     ///
@@ -145,11 +164,22 @@ impl TcpRelay {
     /// another backend.
     pub async fn relay_owned(
         &self,
-        mut inbound: TcpStream,
-        mut outbound: TcpStream,
+        inbound: TcpStream,
+        outbound: TcpStream,
         context: RelayContext,
     ) -> io::Result<RelayOutcome> {
-        self.run(&mut inbound, &mut outbound, context).await
+        let mut sockets = OwnedRelaySockets {
+            inbound,
+            outbound,
+            completed: false,
+        };
+        let outcome = self
+            .run(&mut sockets.inbound, &mut sockets.outbound, context)
+            .await;
+        // `run` owns normal EOF and returned-error semantics. Only a dropped
+        // pending future needs the cancellation backstop below.
+        sockets.completed = true;
+        outcome
     }
 
     /// Relays a single direction between two owned socket halves.
@@ -848,6 +878,12 @@ struct PipePoolStats {
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PipePoolSnapshot {
+    /// Immutable maximum number of idle pairs retained by this pool.
+    pub retained_capacity: u64,
+    /// Empty pipe pairs currently owned by the idle pool.
+    pub retained_pairs: u64,
+    /// Sum of queued bytes in retained pipes; `None` means inspection failed.
+    pub pending_bytes: Option<u64>,
     /// Retrievals answered without any pipe syscall.
     pub hits: u64,
     /// Retrievals that created a pipe.
@@ -922,7 +958,14 @@ impl PipePool {
     }
 
     fn snapshot(&self) -> PipePoolSnapshot {
+        let free = lock_recover(&self.free);
+        let pending_bytes = free.iter().try_fold(0_u64, |total, pipe| {
+            total.checked_add(rr_linux::socket::pending_input(pipe.pair.read_fd()).ok()? as u64)
+        });
         PipePoolSnapshot {
+            retained_capacity: self.keep as u64,
+            retained_pairs: free.len() as u64,
+            pending_bytes,
             hits: self.stats.hits.load(Ordering::Relaxed),
             misses: self.stats.misses.load(Ordering::Relaxed),
             discards: self.stats.discards.load(Ordering::Relaxed),
@@ -1384,6 +1427,78 @@ mod tests {
         BackendRequest, DirectionalRelayOutcome, RelayBackend, RelayContext, RelayDirection,
     };
 
+    async fn assert_cancelled_owned_relay_resets_drained_peers(splice: bool) {
+        let budget = FdBudget::new(64);
+        let relay = TcpRelay::new(
+            TcpRelayConfig {
+                splice,
+                pipe_pool: false,
+                ..TcpRelayConfig::for_test()
+            },
+            budget.clone(),
+        )
+        .expect("relay policy");
+        let (mut client, inbound) = tcp_pair().await;
+        let (outbound, mut target) = tcp_pair().await;
+        let task = tokio::spawn(async move {
+            relay
+                .relay_owned(inbound, outbound, RelayContext::owned())
+                .await
+        });
+        // Drain both directions first: unread bytes must not accidentally
+        // produce RST and mask a missing cancellation guard.
+        time::timeout(Duration::from_secs(2), async {
+            client.write_all(b"ping").await.expect("send request");
+            let mut bytes = [0_u8; 4];
+            target
+                .read_exact(&mut bytes)
+                .await
+                .expect("receive request");
+            assert_eq!(&bytes, b"ping");
+            target.write_all(b"pong").await.expect("send response");
+            client
+                .read_exact(&mut bytes)
+                .await
+                .expect("receive response");
+            assert_eq!(&bytes, b"pong");
+        })
+        .await
+        .expect("bidirectional progress");
+        if splice {
+            assert_eq!(
+                budget.in_use(),
+                u64::from(crate::transport::UNITS_SPLICE_RELAY),
+                "the splice case must exercise real pipe-backed transfer"
+            );
+        }
+        task.abort();
+        assert!(
+            task.await
+                .expect_err("task must be cancelled")
+                .is_cancelled()
+        );
+        for mut peer in [client, target] {
+            let error = time::timeout(Duration::from_secs(2), peer.read(&mut [0_u8; 1]))
+                .await
+                .expect("close must arrive")
+                .expect_err("cancelling a live relay must reset, not deliver clean EOF");
+            assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+        }
+        assert_eq!(budget.in_use(), 0, "cancellation returns all pipe permits");
+        assert_eq!(budget.underflows(), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_owned_buffered_relay_resets_drained_peers() {
+        assert_cancelled_owned_relay_resets_drained_peers(false).await;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_owned_splice_relay_resets_drained_peers() {
+        assert_cancelled_owned_relay_resets_drained_peers(true).await;
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn bounded_buffered_relay_preserves_half_close() {
         let relay = TcpRelay::new(
@@ -1808,6 +1923,57 @@ mod tests {
         assert_eq!(pool.snapshot().hits, 1);
         assert_eq!(budget.in_use(), baseline, "a hit acquires nothing new");
         drop(second);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn saturated_pipe_pool_reuses_bounded_storage_and_descriptor_permits() {
+        const KEEP: usize = 8;
+        let budget = FdBudget::new(16);
+        let pool = super::PipePool::new(8, budget.clone());
+        let mut retained_capacity = None;
+        let mut retained_descriptors = None;
+        for _ in 0..128 {
+            let pipes: [_; KEEP] = std::array::from_fn(|_| pool.take().expect("bounded take"));
+            assert_eq!(budget.in_use(), 16);
+            assert!(pool.take().is_none(), "all descriptor permits are owned");
+            for pipe in pipes {
+                assert_eq!(
+                    rr_linux::socket::pending_input(pipe.pair.read_fd()).unwrap(),
+                    0
+                );
+                pool.give_back(pipe);
+            }
+            let free = super::lock_recover(&pool.free);
+            assert_eq!(free.len(), KEEP);
+            assert_eq!(budget.in_use(), 16, "retained pipes retain their permits");
+            let mut descriptors: [_; KEEP] =
+                std::array::from_fn(|index| free[index].pair.read_fd().as_raw_fd());
+            descriptors.sort_unstable();
+            assert_eq!(
+                *retained_capacity.get_or_insert(free.capacity()),
+                free.capacity()
+            );
+            assert_eq!(
+                retained_descriptors.get_or_insert(descriptors),
+                &descriptors
+            );
+        }
+        let allocation = allocation_counter::measure(|| {
+            for _ in 0..128 {
+                let pipes: [_; KEEP] = std::array::from_fn(|_| pool.take().expect("warm take"));
+                for pipe in pipes {
+                    pool.give_back(pipe);
+                }
+            }
+        });
+        assert_eq!(
+            allocation.count_total, 0,
+            "saturated reuse allocates nothing"
+        );
+        assert_eq!(allocation.bytes_current, 0);
+        drop(pool);
+        assert_eq!(budget.in_use(), 0, "pool retirement releases every permit");
     }
 
     #[cfg(target_os = "linux")]

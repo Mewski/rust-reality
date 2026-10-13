@@ -144,9 +144,9 @@ values happen to be visible in one place.
 
 ## Mixing NXR and Handoff
 
-Nothing requires the landings to use the same protocol. A trusted landing on
-NXR and a less-trusted one on Handoff is a legitimate configuration, and the
-line node's file simply carries two outbounds with different `type` values.
+Nothing requires the landings to use the same protocol. One landing on NXR
+and another on Handoff is a legitimate configuration. Both must be trusted
+with content. The line node declares two outbounds with different `type` values.
 
 ## Failure is per-connection
 

@@ -46,11 +46,15 @@ key material remain redacted from `Debug` and are zeroized on drop.
 A landing derives the current cipher and IV from the transferred secret before
 installing its transferred sequence. Later KeyUpdate derives the next secret,
 key, IV, and cipher completely before replacing live state, then resets the
-sequence to zero. Any failure leaves the old generation unchanged.
+sequence to zero. A derivation failure leaves the old generation unchanged.
+An ambiguous or cancelled record write instead poisons the writer's record
+layer, preventing further output, rekeying, or export of uncertain state.
 
-Version 1 is not accepted alongside version 2. A state-version mismatch fails
-closed before authentication work, consistent with the repository's one-current-
-contract and forward-only rules.
+Version 1 is not accepted alongside version 2. A header state-version mismatch
+returns `HandoffError::Version` before body reading, replay reservation, or
+authentication work. An authenticated blob with an inconsistent inner version
+returns `HandoffError::State`. Both close silently with zero response bytes,
+before destination DNS or connect. There is no version-dispatched parser.
 
 ## Consequences
 
@@ -61,6 +65,14 @@ TrafficKeys-based continuation API, compatibility parser, or duplicated
 key-plus-secret representation.
 
 The encrypted blob size changes by cipher suite, but remains within the existing
-bounded message cap. LINE and LANDING must be deployed with the same current
-binary contract; mixed continuation-state versions reject one another rather
-than silently resuming without KeyUpdate capability.
+bounded message cap. Every reachable LINE→LANDING pair must implement the same
+continuation-state contract. Matching configuration or release family alone is
+insufficient. Credential-rotation overlap does not accept old state versions.
+
+Upgrade and rollback cross an admission-and-drain boundary: stop new sessions,
+drain or terminate active sessions and retire unused warm connections, deploy
+matching endpoints, then reopen admission. Isolated cohorts may coexist only
+when routing cannot cross contracts. An older binary cannot import version-2
+state or assume ownership of a live resumed session. Sessions survive only
+while their original owners remain running. The current operator contract is
+documented in [Handoff](../en/configuration/handoff.md), not a migration archive.

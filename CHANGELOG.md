@@ -15,6 +15,81 @@ All notable user-facing changes to this project are documented in this file.
   pending KeyUpdate response survive transfer. Upgrade LINE and LANDING
   together; mixed continuation-state versions reject Handoff.
 
+### Fixed
+
+- Incomplete TLS record writes permanently invalidate the write direction.
+  Cancellation, socket errors, and timeouts cannot replay ambiguous ciphertext
+  or export it as valid Handoff state.
+
+## [2.0.2] - 2026-10-11
+
+Stability qualification, RTT/loss fault coherence, and dependency maintenance.
+Existing configuration remains compatible: this is a binary-only upgrade.
+No changes to LANDING.json, LINE.json, STANDALONE.json or clients are needed.
+
+### Fixed
+
+- Speculative warm pools back off after descriptor-pressure shedding, preventing
+  rapid refill/shed loops when their own released permits clear hysteresis.
+  Active sessions and cold-path admission remain unchanged.
+- CLI startup preserves intentionally inherited descriptors, including
+  configurations passed through `/proc/self/fd`. Qualification launchers isolate
+  runner descriptors instead of closing application descriptors in production.
+- Idle replay entries release occupancy on the one-second resource maintenance
+  cadence in both resource modes, without changing replay deadlines. Debug logs
+  expose bounded resource ownership and generation retirement for qualification.
+- Native soak failures retain collected observations and attempt final identity
+  checks; terminal evidence preserves the original error if finalization fails.
+- Established Vision/NXR socket failures (including a broken pipe when LANDING
+  exits) retain typed outbound, timeout, or resource-limit diagnostics instead
+  of being misreported as malformed protocol input.
+- Initial short replies whose available prefix already rules out nested TLS
+  (for example `ack` or `pong`) are forwarded without waiting for five bytes or
+  origin EOF. Plausible partial TLS headers retain existing classification and
+  authenticated Direct boundaries; this does not claim progress for every
+  ambiguous TLS-looking byte sequence.
+
+### Changed
+
+- Active stability samples check resource ceilings independently of periodic
+  ownership counters. Fixed recovery checkpoints still require reconciliation;
+  asynchronous evidence is not labeled a product leak. Numeric limits and
+  recovery deadlines are unchanged; production admission is unaffected.
+- Stability evidence uses a strict offline ownership contract with distinct
+  PASS, FAIL, NOT_RUN and INVALID verdicts. Historical resource failures retain
+  their original verdicts; replacement qualification requires a frozen candidate.
+  The maintained local VM runner records fixed-cycle transfers, received prefixes,
+  fault actions and guest observations; separate required checks remain mandatory.
+  Required local, CI/security and lifecycle checks retain command execution and
+  final identity receipts through the maintained stability check collector.
+  Release smoke can retain secret-free package execution receipts and bound
+  archives for offline qualification across all supported tiers.
+- Release qualification accepts isolated QEMU multi-node stress and fault
+  evidence without mandatory dual-VPS access or an additional long soak.
+  Exact-head quality/security gates, resource bounds, temporal-boundary tests
+  and release-artifact checks remain required; real-WAN rollout validation
+  and production authorization stay separate.
+- Hosted Frozen qualification runs the four QEMU cells (Handoff/NXR ×
+  ordinary/constrained) as an Actions matrix with ACK-driven restart census,
+  guest-clock binding, and offline merge evaluation; production wire formats
+  and admission limits are unchanged.
+- Connection-task bookkeeping submits the accepted future directly rather than
+  wrapping it in another large async state, reducing task storage without an
+  extra allocation, lock, or change to connection limits and cancellation.
+- Rust API: `ConnectionTasks::spawn` now takes a future returning
+  `ConnectionTaskResult`; construct that result with `ConnectionTaskResult::new`
+  in the caller's existing future. Wire and configuration formats are unchanged.
+
+### Security
+
+- Upgrade production `hickory-resolver` (with `hickory-net` / `hickory-proto`)
+  from 0.26.1 to 0.26.3. DNS error classification keeps timeout, truncated,
+  foreign-class, and connection-closed semantics; Dependabot #277's incomplete
+  0.26.2 lock-only bump is superseded.
+- Align the fuzz workspace with rustls 0.23.45 / webpki and hickory 0.26.3 so
+  fuzz graphs match the production security floor; audit and deny gates remain
+  enabled.
+
 ## [2.0.1]
 
 ### Fixed

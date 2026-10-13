@@ -521,12 +521,8 @@ impl VisionHandler {
         // Reuniting consumes both client halves, so the landing descriptor —
         // which now exists and would otherwise leak a FIN — carries its own
         // guard across the only fallible step between the two phases.
-        let client_stream = {
-            let _landing_abort = SocketAbortGuard::new(&handoff_stream);
-            client_read_half
-                .reunite(client_write_half)
-                .map_err(|_| VisionSessionError::HandoffLine(HandoffLineError::Reunite))?
-        };
+        let client_stream =
+            reunite_handoff_client(client_read_half, client_write_half, &handoff_stream)?;
         // Classify the silent protocol's only failure signal before any socket
         // moves into the relay: no TLS downlink byte within the configured
         // first-byte deadline means rejection. Both guards borrow their
@@ -592,6 +588,23 @@ impl VisionHandler {
             ..VisionRelayStats::default()
         })
     }
+}
+
+/// Keeps the landing carrier abortable until client socket ownership is whole.
+fn reunite_handoff_client(
+    reader: OwnedReadHalf,
+    writer: OwnedWriteHalf,
+    landing: &TcpStream,
+) -> Result<TcpStream, VisionSessionError> {
+    let mut landing_abort = SocketAbortGuard::new(landing);
+    let client = reader
+        .reunite(writer)
+        .map_err(|_| VisionSessionError::HandoffLine(HandoffLineError::Reunite))?;
+    // A guard's Drop changes the kernel socket option permanently. Disarm
+    // this temporary guard before the first-downlink and relay guards take
+    // over, so successful sessions retain normal FIN/half-close semantics.
+    landing_abort.disarm();
+    Ok(client)
 }
 
 struct AcceptedVisionRequest {
@@ -1937,8 +1950,9 @@ impl NestedRecordReader {
 
     /// Classifies the next nested record out of the buffered range.
     ///
-    /// The classification semantics are exactly the record-exact reader's: EOF
-    /// before any byte is `Eof`; socket EOF with fewer than five buffered bytes
+    /// A prefix that cannot be TLS is returned immediately as `Unframed`, even
+    /// when fewer than five bytes are available. Otherwise EOF before any byte
+    /// is `Eof`; socket EOF with fewer than five buffered bytes
     /// yields the remaining bytes as `Unframed`; a header that fails
     /// [`looks_like_tls_record_header`] or declares a body above
     /// [`MAX_NESTED_TLS_RECORD_SIZE`] yields the five header bytes as
@@ -1947,6 +1961,22 @@ impl NestedRecordReader {
     /// [`VisionSessionError::DestinationTruncatedTlsRecord`].
     async fn next(&mut self, timeout: Duration) -> Result<NestedRead<'_>, VisionSessionError> {
         while self.buffered_end - self.buffered_start < NESTED_TLS_HEADER_SIZE {
+            let start = self.buffered_start;
+            let prefix = self
+                .socket_buffer
+                .get(start..self.buffered_end)
+                .unwrap_or_default();
+            // Do not wait for more application bytes once TLS is impossible:
+            // an origin can legitimately wait for the next request after a
+            // one-byte response, without sending FIN.
+            if !could_be_tls_record_header(prefix) {
+                self.buffered_start = self.buffered_end;
+                return Ok(NestedRead::Unframed(
+                    self.socket_buffer
+                        .get(start..self.buffered_end)
+                        .unwrap_or_default(),
+                ));
+            }
             if !self.refill(timeout).await? {
                 let start = self.buffered_start;
                 let remaining = self.buffered_end - start;
@@ -2127,8 +2157,24 @@ impl VectoredRead for NestedRecordReader {
     }
 }
 
-const fn looks_like_tls_record_header(header: &[u8; NESTED_TLS_HEADER_SIZE]) -> bool {
-    matches!(header[0], 20..=23) && header[1] == 0x03 && header[2] <= 0x04
+/// Whether the available prefix can still satisfy the existing TLS header
+/// predicate. Empty and ambiguous prefixes remain undecided; no sniff timer or
+/// speculative Direct transition is introduced.
+fn could_be_tls_record_header(prefix: &[u8]) -> bool {
+    prefix.first().is_none_or(|byte| matches!(byte, 20..=23))
+        && prefix.get(1).is_none_or(|byte| *byte == 0x03)
+        && prefix.get(2).is_none_or(|byte| *byte <= 0x04)
+}
+
+fn looks_like_tls_record_header(header: &[u8; NESTED_TLS_HEADER_SIZE]) -> bool {
+    could_be_tls_record_header(header)
+}
+
+/// Exercises the production nested-header prefix predicate without socket I/O.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn fuzz_nested_tls_header_prefix(prefix: &[u8]) -> bool {
+    could_be_tls_record_header(prefix)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2405,6 +2451,44 @@ mod tests {
     const USER: UserId = UserId::new([0x33; 16]);
 
     #[tokio::test(flavor = "current_thread")]
+    async fn successful_handoff_reunite_preserves_graceful_carrier_close() {
+        let (client, _client_peer) = tcp_pair().await;
+        let (landing, mut landing_peer) = tcp_pair().await;
+        let (reader, writer) = client.into_split();
+        let _client = super::reunite_handoff_client(reader, writer, &landing)
+            .expect("matching client halves must reunite");
+        drop(landing);
+        let mut byte = [0_u8; 1];
+        let read = timeout(TEST_TIMEOUT, landing_peer.read(&mut byte))
+            .await
+            .expect("carrier close must be observable")
+            .expect("successful reunification must not arm an abortive carrier close");
+        assert_eq!(read, 0, "healthy carrier teardown must deliver FIN");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_handoff_reunite_still_aborts_carrier() {
+        let (first, _first_peer) = tcp_pair().await;
+        let (second, _second_peer) = tcp_pair().await;
+        let (landing, mut landing_peer) = tcp_pair().await;
+        let (reader, _first_writer) = first.into_split();
+        let (_second_reader, writer) = second.into_split();
+        let error = super::reunite_handoff_client(reader, writer, &landing)
+            .expect_err("unrelated client halves must fail closed");
+        assert!(matches!(
+            error,
+            VisionSessionError::HandoffLine(super::HandoffLineError::Reunite)
+        ));
+        drop(landing);
+        let mut byte = [0_u8; 1];
+        let error = timeout(TEST_TIMEOUT, landing_peer.read(&mut byte))
+            .await
+            .expect("carrier abort must be observable")
+            .expect_err("failed reunification must reset the carrier");
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn resumed_framed_session_survives_both_asymmetries_and_sparse_alternation() {
         let (mut client, inbound) = tcp_pair().await;
         let (destination, mut target) = tcp_pair().await;
@@ -2452,11 +2536,11 @@ mod tests {
                         target.read_exact(&mut byte).await?;
                         assert_eq!(&byte, b"U");
                     } else {
-                        // >=5 bytes lets the generic nested-TLS classifier
-                        // reject TLS immediately, without protocol detection.
-                        target.write_all(b"event").await?;
+                        // The origin remains open and waits for receipt before
+                        // its next write: short replies must not wait for FIN.
+                        target.write_all(b"ack").await?;
                         let mut response = Vec::new();
-                        while response.len() < 5 {
+                        while response.len() < 3 {
                             let mut record = read_tls_record(&mut client, TEST_TIMEOUT)
                                 .await
                                 .map_err(io::Error::other)?
@@ -2475,7 +2559,7 @@ mod tests {
                                 .map_err(io::Error::other)?;
                             response.extend_from_slice(&decoded);
                         }
-                        assert_eq!(response, b"event");
+                        assert_eq!(response, b"ack");
                     }
                 }
             }
@@ -2516,7 +2600,7 @@ mod tests {
         traffic.expect("both directions remain byte-exact");
         let stats = stats.expect("healthy asymmetric session");
         assert_eq!(stats.uplink_bytes(), 19);
-        assert_eq!(stats.downlink_bytes(), 65);
+        assert_eq!(stats.downlink_bytes(), 41);
         assert!(!stats.uplink_direct());
         assert!(!stats.downlink_direct());
     }
@@ -3720,6 +3804,156 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn short_non_tls_response_progresses_without_origin_eof() {
+        for response in [
+            b"x".as_slice(),
+            b"ok",
+            b"xxx",
+            b"pong",
+            &[22, 4],
+            &[22, 3, 5],
+        ] {
+            let (mut origin, server) = tcp_pair().await;
+            let (read_half, _write_half) = server.into_split();
+            let mut reader = super::NestedRecordReader::new(read_half);
+            reader
+                .idle
+                .set_activity(Arc::new(crate::io_activity::SessionActivity::default()));
+            origin.write_all(response).await.expect("origin response");
+            let observed = timeout(TEST_TIMEOUT, reader.next(TEST_TIMEOUT))
+                .await
+                .expect("response must progress while origin stays open")
+                .expect("classification succeeds");
+            match observed {
+                super::NestedRead::Unframed(bytes) => assert_eq!(bytes, response),
+                _ => panic!("plain response must be forwarded as unframed"),
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn short_resumed_response_precedes_origin_fin_with_or_without_uplink_fin() {
+        for half_close in [false, true] {
+            let (mut client, inbound) = tcp_pair().await;
+            let (destination, mut target) = tcp_pair().await;
+            let (tls, mut client_write, mut client_read) = tls_states();
+            let (reader, writer) = TlsApplicationIo::new(inbound, tls).into_owned_split();
+            let relay =
+                TcpRelay::new(TcpRelayConfig::for_test(), FdBudget::new(4_096)).expect("relay");
+            let mut encoder = VisionEncoder::with_padding_seed(USER, &[0x5a; 44]);
+            let mut initial = Vec::new();
+            encoder
+                .encode(b"request", VisionCommand::Continue, false, &mut initial)
+                .expect("request");
+            let session = super::run_resumed_session(
+                reader,
+                writer,
+                destination,
+                USER,
+                initial,
+                &relay,
+                TEST_TIMEOUT,
+            );
+            let traffic = async {
+                let mut request = [0; 7];
+                target.read_exact(&mut request).await?;
+                assert_eq!(&request, b"request");
+                let mut wire = Vec::new();
+                if half_close {
+                    client_write
+                        .seal_into(ContentType::Alert, &[1, 0], 0, &mut wire)
+                        .map_err(io::Error::other)?;
+                    client.write_all(&wire).await?;
+                    assert_eq!(target.read(&mut [0]).await?, 0);
+                }
+                target.write_all(b"pong").await?;
+                let mut first = true;
+                let mut decoder = VisionDecoder::new(USER);
+                let mut decoded = Vec::new();
+                let mut response = Vec::new();
+                // FIN is deliberately withheld until the complete payload is received.
+                while response.len() < 4 {
+                    let mut record = read_tls_record(&mut client, TEST_TIMEOUT)
+                        .await
+                        .map_err(io::Error::other)?
+                        .into_wire();
+                    let opened = client_read
+                        .open_in_place(&mut record)
+                        .map_err(io::Error::other)?;
+                    let payload = if first {
+                        first = false;
+                        &opened.plaintext()[2..]
+                    } else {
+                        opened.plaintext()
+                    };
+                    decoder
+                        .decode(payload, &mut decoded)
+                        .map_err(io::Error::other)?;
+                    response.extend_from_slice(&decoded);
+                }
+                assert_eq!(response, b"pong");
+                target.shutdown().await?;
+                if !half_close {
+                    wire.clear();
+                    client_write
+                        .seal_into(ContentType::Alert, &[1, 0], 0, &mut wire)
+                        .map_err(io::Error::other)?;
+                    client.write_all(&wire).await?;
+                    assert_eq!(target.read(&mut [0]).await?, 0);
+                }
+                let mut record = read_tls_record(&mut client, TEST_TIMEOUT)
+                    .await
+                    .map_err(io::Error::other)?
+                    .into_wire();
+                let opened = client_read
+                    .open_in_place(&mut record)
+                    .map_err(io::Error::other)?;
+                assert_eq!(opened.content_type(), ContentType::Alert);
+                Ok::<_, io::Error>(())
+            };
+            let (stats, traffic) = timeout(TEST_TIMEOUT, async { tokio::join!(session, traffic) })
+                .await
+                .expect("bounded response");
+            traffic.expect("response precedes FIN");
+            let stats = stats.expect("healthy session");
+            assert_eq!(stats.downlink_bytes(), 4);
+            assert!(!stats.downlink_direct());
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn plausible_tls_prefix_survives_a_pending_read() {
+        let (mut origin, server) = tcp_pair().await;
+        let (read_half, _write_half) = server.into_split();
+        let mut reader = super::NestedRecordReader::new(read_half);
+        reader
+            .idle
+            .set_activity(Arc::new(crate::io_activity::SessionActivity::default()));
+        let hello = record(22, &server_hello(0x1301, true));
+        for byte in &hello[..4] {
+            origin.write_all(&[*byte]).await.expect("fragment");
+            assert!(
+                timeout(Duration::from_millis(10), reader.next(TEST_TIMEOUT))
+                    .await
+                    .is_err(),
+                "a plausible incomplete header must not be downgraded"
+            );
+        }
+        origin
+            .write_all(&hello[4..])
+            .await
+            .expect("remaining record");
+        match reader
+            .next(TEST_TIMEOUT)
+            .await
+            .expect("complete TLS record")
+        {
+            super::NestedRead::Record(bytes) => assert_eq!(bytes, hello),
+            _ => panic!("fragmentation must preserve TLS classification"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn nested_reader_classifies_fragmented_records_and_clean_eof() {
         let (mut client, server) = tcp_pair().await;
         let (destination, _) = server.into_split();
@@ -4379,5 +4613,528 @@ mod tests {
             panic!("expected relay error: {error}");
         };
         assert_eq!(source.kind(), io::ErrorKind::ConnectionAborted);
+    }
+
+    /// Release-blocking real-time proof. Paused clocks cannot satisfy it.
+    ///
+    /// SSE is a quiet uplink with continuing downlink. WebSocket is sparse
+    /// traffic in both directions. Both last 600 seconds. A delayed response
+    /// begins after 190 seconds, and half-close drains after crossing 120
+    /// seconds. A blocked pending write must still fail on the production
+    /// 120-second stall, not because the opposite direction is quiet.
+    ///
+    /// Uses `current_thread` like the other non-ignored Vision proofs: the
+    /// accumulation is sequential, and multi-thread Tokio I/O registration
+    /// trips ThreadSanitizer inside `ScheduledIo` (ADR 0057). Ignored
+    /// multi-thread diagnostics and the 600s matrix keep their flavors.
+    #[tokio::test(flavor = "current_thread")]
+    async fn three_downlink_chunks_accumulate() {
+        let mut session = open_framed(b"SSE", 0x11).await;
+        let mut request = [0; 3];
+        session.target.read_exact(&mut request).await.unwrap();
+        let mut decoder = VisionDecoder::new(USER);
+        let mut decoded = Vec::new();
+        let mut first = true;
+        let mut expected = Vec::new();
+        for tick in 0..3_u8 {
+            let chunk = [b'S', tick];
+            session.target.write_all(&chunk).await.unwrap();
+            let need = decoded.len() + chunk.len();
+            read_exact_payload(&mut session, &mut decoder, &mut decoded, &mut first, need)
+                .await
+                .unwrap();
+            expected.extend_from_slice(&chunk);
+        }
+        assert_eq!(decoded, expected);
+        finish_both(session, expected.len() as u64).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "diagnostic: three 30s quiet downlink chunks"]
+    async fn three_quiet_downlink_chunks_survive() {
+        let mut session = open_framed(b"SSE", 0x11).await;
+        let mut request = [0; 3];
+        session.target.read_exact(&mut request).await.unwrap();
+        let mut decoder = VisionDecoder::new(USER);
+        let mut decoded = Vec::new();
+        let mut first = true;
+        let mut expected = Vec::new();
+        for tick in 0..3_u8 {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            let chunk = [b'S', tick];
+            session.target.write_all(&chunk).await.unwrap();
+            let need = decoded.len() + chunk.len();
+            if let Err(error) =
+                read_exact_payload(&mut session, &mut decoder, &mut decoded, &mut first, need).await
+            {
+                session.task.abort();
+                panic!("chunk {tick} was not relayed: {error}");
+            }
+            expected.extend_from_slice(&chunk);
+        }
+        assert_eq!(decoded, expected);
+        finish_both(session, expected.len() as u64).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "diagnostic: 120s pending write beside one quiet downlink"]
+    async fn quiet_downlink_survives_a_parallel_pending_write() {
+        let stall = tokio::spawn(pending_write_stalls_at_120s());
+        let mut session = open_framed(b"SSE", 0x11).await;
+        let mut request = [0; 3];
+        session.target.read_exact(&mut request).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        session.target.write_all(b"AB").await.unwrap();
+        let mut decoder = VisionDecoder::new(USER);
+        let mut decoded = Vec::new();
+        let mut first = true;
+        let read = tokio::time::timeout(
+            Duration::from_secs(60),
+            read_exact_payload(&mut session, &mut decoder, &mut decoded, &mut first, 2),
+        )
+        .await;
+        if !matches!(read, Ok(Ok(()))) || decoded != b"AB" {
+            session.task.abort();
+            panic!("parallel pending write hid the downlink chunk: {read:?} {decoded:?}");
+        }
+        let stall = stall.await.unwrap();
+        assert!(
+            stall.is_ok(),
+            "parallel stall did not stay bounded: {stall:?}"
+        );
+        finish_both(session, 2).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "diagnostic: one downlink chunk after 30s quiet"]
+    async fn one_downlink_chunk_survives_a_quiet_30s() {
+        let mut session = open_framed(b"SSE", 0x11).await;
+        let mut request = [0; 3];
+        session.target.read_exact(&mut request).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        session.target.write_all(b"AB").await.unwrap();
+        let mut decoder = VisionDecoder::new(USER);
+        let mut decoded = Vec::new();
+        let mut first = true;
+        let read = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_exact_payload(&mut session, &mut decoder, &mut decoded, &mut first, 2),
+        )
+        .await;
+        match read {
+            Ok(Ok(())) => assert_eq!(decoded, b"AB"),
+            other => {
+                session.task.abort();
+                panic!("downlink chunk was not relayed: {other:?}");
+            }
+        }
+        finish_both(session, 2).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[ignore = "release qualification: real 600s authenticated connection matrix"]
+    async fn authenticated_connections_survive_quiet_directions_for_600s() {
+        let started = std::time::Instant::now();
+        let (sse, websocket, quiet_downlink, delayed, half_close, stall) = tokio::join!(
+            sse_downlink_for_600s(),
+            websocket_for_600s(),
+            quiet_downlink_for_600s(),
+            delayed_response_after_180s(),
+            half_close_after_crossing_120s(),
+            pending_write_stalls_at_120s(),
+        );
+        sse.expect("SSE quiet uplink must survive 600s");
+        websocket.expect("WebSocket session must survive 600s");
+        quiet_downlink.expect("quiet downlink must survive 600s");
+        delayed.expect("a response after 180s must not be a timeout");
+        half_close.expect("half-close must drain the opposite direction");
+        stall.expect("a pending write must hit the 120s stall bound");
+        assert!(
+            started.elapsed() >= Duration::from_secs(600),
+            "the matrix must actually cross 600 elapsed seconds"
+        );
+    }
+
+    struct LiveSession {
+        client: TcpStream,
+        client_write: Tls13RecordLayer,
+        client_read: Tls13RecordLayer,
+        encoder: VisionEncoder,
+        target: TcpStream,
+        task: tokio::task::JoinHandle<Result<super::VisionRelayStats, VisionSessionError>>,
+    }
+
+    async fn open_framed(initial: &[u8], seed: u8) -> LiveSession {
+        let (client, inbound) = tcp_pair().await;
+        let (destination, target) = tcp_pair().await;
+        let (tls, client_write, client_read) = tls_states();
+        let (reader, writer) = TlsApplicationIo::new(inbound, tls).into_owned_split();
+        let relay = TcpRelay::new(TcpRelayConfig::for_test(), FdBudget::new(4_096))
+            .expect("relay policy must compile");
+        let mut encoder = VisionEncoder::with_padding_seed(USER, &[seed; 44]);
+        let mut request = Vec::new();
+        encoder
+            .encode(initial, VisionCommand::Continue, false, &mut request)
+            .expect("initial frame");
+        let task = tokio::spawn(async move {
+            super::run_resumed_session(
+                reader,
+                writer,
+                destination,
+                USER,
+                request,
+                &relay,
+                crate::io_activity::WRITE_STALL_TIMEOUT,
+            )
+            .await
+        });
+        LiveSession {
+            client,
+            client_write,
+            client_read,
+            encoder,
+            target,
+            task,
+        }
+    }
+
+    async fn read_exact_payload(
+        session: &mut LiveSession,
+        decoder: &mut VisionDecoder,
+        decoded: &mut Vec<u8>,
+        first: &mut bool,
+        need: usize,
+    ) -> io::Result<()> {
+        while decoded.len() < need {
+            let mut record = read_tls_record(&mut session.client, Duration::from_secs(60))
+                .await
+                .map_err(|error| io::Error::other(error.to_string()))?
+                .into_wire();
+            let opened = session
+                .client_read
+                .open_in_place(&mut record)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            if opened.content_type() == ContentType::Alert {
+                return Err(io::Error::other("alert before the expected payload"));
+            }
+            let payload = if *first {
+                *first = false;
+                opened
+                    .plaintext()
+                    .get(2..)
+                    .ok_or_else(|| io::Error::other("missing VLESS response header"))?
+            } else {
+                opened.plaintext()
+            };
+            // `decode` clears the caller's buffer. Accumulated chunks must
+            // survive the next record.
+            decoder
+                .decode_append(payload, decoded)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    fn seal_uplink(session: &mut LiveSession, payload: &[u8]) -> io::Result<Vec<u8>> {
+        let mut frame = Vec::new();
+        session
+            .encoder
+            .encode(payload, VisionCommand::Continue, false, &mut frame)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        let mut wire = Vec::new();
+        session
+            .client_write
+            .seal_into(ContentType::ApplicationData, &frame, 0, &mut wire)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        Ok(wire)
+    }
+
+    async fn finish_both(mut session: LiveSession, downlink: u64) -> io::Result<()> {
+        let mut alert = Vec::new();
+        session
+            .client_write
+            .seal_into(ContentType::Alert, &[1, 0], 0, &mut alert)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        session.client.write_all(&alert).await?;
+        let mut ignored = [0; 64];
+        let _ = session.target.read(&mut ignored).await?;
+        session.target.shutdown().await?;
+        loop {
+            let mut record = read_tls_record(&mut session.client, Duration::from_secs(30))
+                .await
+                .map_err(|error| io::Error::other(error.to_string()))?
+                .into_wire();
+            let opened = session
+                .client_read
+                .open_in_place(&mut record)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            if opened.content_type() == ContentType::Alert {
+                break;
+            }
+        }
+        let stats = session
+            .task
+            .await
+            .map_err(|error| io::Error::other(error.to_string()))?
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        if stats.downlink_bytes() != downlink || stats.uplink_direct() || stats.downlink_direct() {
+            return Err(io::Error::other(format!(
+                "unexpected stats uplink={} downlink={} expected_downlink={downlink}",
+                stats.uplink_bytes(),
+                stats.downlink_bytes()
+            )));
+        }
+        Ok(())
+    }
+
+    async fn sse_downlink_for_600s() -> io::Result<()> {
+        let mut session = open_framed(b"SSE", 0x11).await;
+        let mut request = [0; 3];
+        session.target.read_exact(&mut request).await?;
+        if &request != b"SSE" {
+            session.task.abort();
+            return Err(io::Error::other("SSE request was corrupted"));
+        }
+        let started = std::time::Instant::now();
+        let mut decoder = VisionDecoder::new(USER);
+        let mut decoded = Vec::new();
+        let mut first = true;
+        let mut expected = Vec::new();
+        let mut tick = 0_u8;
+        loop {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            let chunk = [b'S', tick];
+            tick = tick.wrapping_add(1);
+            session.target.write_all(&chunk).await?;
+            let need = decoded.len() + chunk.len();
+            read_exact_payload(&mut session, &mut decoder, &mut decoded, &mut first, need).await?;
+            expected.extend_from_slice(&chunk);
+            if started.elapsed() >= Duration::from_secs(600) {
+                break;
+            }
+        }
+        if decoded != expected {
+            session.task.abort();
+            return Err(io::Error::other("SSE payload or duration failed"));
+        }
+        finish_both(session, expected.len() as u64).await
+    }
+
+    async fn websocket_for_600s() -> io::Result<()> {
+        let mut session = open_framed(b"WS", 0x22).await;
+        let mut request = [0; 2];
+        session.target.read_exact(&mut request).await?;
+        if &request != b"WS" {
+            session.task.abort();
+            return Err(io::Error::other("WebSocket request was corrupted"));
+        }
+        let started = std::time::Instant::now();
+        let mut decoder = VisionDecoder::new(USER);
+        let mut decoded = Vec::new();
+        let mut first = true;
+        let mut expected_down = Vec::new();
+        let mut tick = 0_u8;
+        loop {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            let up = [b'u', tick];
+            let down = [b'd', tick];
+            tick = tick.wrapping_add(1);
+            let wire = seal_uplink(&mut session, &up)?;
+            session.client.write_all(&wire).await?;
+            let mut got = [0; 2];
+            session.target.read_exact(&mut got).await?;
+            if got != up {
+                session.task.abort();
+                return Err(io::Error::other("WebSocket uplink was corrupted"));
+            }
+            session.target.write_all(&down).await?;
+            let need = decoded.len() + down.len();
+            read_exact_payload(&mut session, &mut decoder, &mut decoded, &mut first, need).await?;
+            expected_down.extend_from_slice(&down);
+            if started.elapsed() >= Duration::from_secs(600) {
+                break;
+            }
+        }
+        if decoded != expected_down {
+            session.task.abort();
+            return Err(io::Error::other("WebSocket payload or duration failed"));
+        }
+        finish_both(session, expected_down.len() as u64).await
+    }
+
+    async fn quiet_downlink_for_600s() -> io::Result<()> {
+        let mut session = open_framed(b"UP", 0x33).await;
+        let mut request = [0; 2];
+        session.target.read_exact(&mut request).await?;
+        if &request != b"UP" {
+            session.task.abort();
+            return Err(io::Error::other("uplink request was corrupted"));
+        }
+        let started = std::time::Instant::now();
+        let mut tick = 0_u8;
+        loop {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            let up = [b'q', tick];
+            tick = tick.wrapping_add(1);
+            let wire = seal_uplink(&mut session, &up)?;
+            session.client.write_all(&wire).await?;
+            let mut got = [0; 2];
+            session.target.read_exact(&mut got).await?;
+            if got != up {
+                session.task.abort();
+                return Err(io::Error::other("quiet-downlink uplink was corrupted"));
+            }
+            if started.elapsed() >= Duration::from_secs(600) {
+                break;
+            }
+        }
+        session.target.write_all(b"DONE").await?;
+        let mut decoder = VisionDecoder::new(USER);
+        let mut decoded = Vec::new();
+        let mut first = true;
+        read_exact_payload(&mut session, &mut decoder, &mut decoded, &mut first, 4).await?;
+        if decoded != b"DONE" {
+            session.task.abort();
+            return Err(io::Error::other("delayed opposite payload was corrupted"));
+        }
+        finish_both(session, 4).await
+    }
+
+    async fn delayed_response_after_180s() -> io::Result<()> {
+        let mut session = open_framed(b"WAIT", 0x44).await;
+        let mut request = [0; 4];
+        session.target.read_exact(&mut request).await?;
+        if &request != b"WAIT" {
+            session.task.abort();
+            return Err(io::Error::other("delayed request was corrupted"));
+        }
+        let started = std::time::Instant::now();
+        tokio::time::sleep(Duration::from_secs(190)).await;
+        if started.elapsed() < Duration::from_secs(180) {
+            session.task.abort();
+            return Err(io::Error::other("delay did not cross 180s"));
+        }
+        session.target.write_all(b"LATE").await?;
+        let mut decoder = VisionDecoder::new(USER);
+        let mut decoded = Vec::new();
+        let mut first = true;
+        read_exact_payload(&mut session, &mut decoder, &mut decoded, &mut first, 4).await?;
+        if decoded != b"LATE" {
+            session.task.abort();
+            return Err(io::Error::other("late response was corrupted"));
+        }
+        finish_both(session, 4).await
+    }
+
+    async fn half_close_after_crossing_120s() -> io::Result<()> {
+        let mut session = open_framed(b"HALF", 0x55).await;
+        let mut request = [0; 4];
+        session.target.read_exact(&mut request).await?;
+        if &request != b"HALF" {
+            session.task.abort();
+            return Err(io::Error::other("half-close request was corrupted"));
+        }
+        session.target.write_all(b"ping").await?;
+        let mut decoder = VisionDecoder::new(USER);
+        let mut decoded = Vec::new();
+        let mut first = true;
+        read_exact_payload(&mut session, &mut decoder, &mut decoded, &mut first, 4).await?;
+        let started = std::time::Instant::now();
+        tokio::time::sleep(Duration::from_secs(130)).await;
+        if started.elapsed() < Duration::from_secs(120) || decoded != b"ping" {
+            session.task.abort();
+            return Err(io::Error::other("half-close did not cross 120s intact"));
+        }
+        let mut alert = Vec::new();
+        session
+            .client_write
+            .seal_into(ContentType::Alert, &[1, 0], 0, &mut alert)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        session.client.write_all(&alert).await?;
+        let mut ignored = [0; 8];
+        let end = session.target.read(&mut ignored).await?;
+        if end != 0 {
+            session.task.abort();
+            return Err(io::Error::other(
+                "uplink half-close did not reach the origin",
+            ));
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        session.target.write_all(b"TAIL!").await?;
+        session.target.shutdown().await?;
+        read_exact_payload(&mut session, &mut decoder, &mut decoded, &mut first, 9).await?;
+        if &decoded[4..] != b"TAIL!" {
+            session.task.abort();
+            return Err(io::Error::other("opposite drain was corrupted"));
+        }
+        loop {
+            let mut record = read_tls_record(&mut session.client, Duration::from_secs(30))
+                .await
+                .map_err(|error| io::Error::other(error.to_string()))?
+                .into_wire();
+            let opened = session
+                .client_read
+                .open_in_place(&mut record)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            if opened.content_type() == ContentType::Alert {
+                break;
+            }
+        }
+        let stats = session
+            .task
+            .await
+            .map_err(|error| io::Error::other(error.to_string()))?
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        if stats.downlink_bytes() != 9 {
+            return Err(io::Error::other("half-close downlink count mismatch"));
+        }
+        Ok(())
+    }
+
+    async fn pending_write_stalls_at_120s() -> io::Result<()> {
+        let mut session = open_framed(b"STALL", 0x66).await;
+        let mut request = [0; 5];
+        session.target.read_exact(&mut request).await?;
+        if &request != b"STALL" {
+            session.task.abort();
+            return Err(io::Error::other("stall request was corrupted"));
+        }
+        session.target.write_all(b"X").await?;
+        let mut decoder = VisionDecoder::new(USER);
+        let mut decoded = Vec::new();
+        let mut first = true;
+        read_exact_payload(&mut session, &mut decoder, &mut decoded, &mut first, 1).await?;
+        if decoded != b"X" {
+            session.task.abort();
+            return Err(io::Error::other("stall prefix was corrupted"));
+        }
+        let started = std::time::Instant::now();
+        let mut target = session.target;
+        let task = session.task;
+        let _flood = tokio::spawn(async move {
+            // Larger than this host's 32 MiB TCP receive autotune plus the
+            // 4 MiB send buffer, so the pending write actually blocks.
+            let payload = vec![0x5a; 64 * 1024 * 1024];
+            let _ = target.write_all(&payload).await;
+        });
+        let result = tokio::time::timeout(Duration::from_secs(170), task)
+            .await
+            .map_err(|_| io::Error::other("write stall exceeded 170s"))?
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        let elapsed = started.elapsed();
+        if elapsed < Duration::from_secs(115) {
+            return Err(io::Error::other(format!(
+                "write stall fired too early: {elapsed:?}"
+            )));
+        }
+        match result {
+            Err(VisionSessionError::Tls(
+                crate::protocol::reality::tls13::TlsApplicationIoError::Timeout,
+            )) => Ok(()),
+            Err(VisionSessionError::Timeout) => Ok(()),
+            other => Err(io::Error::other(format!(
+                "pending write did not fail as a stall: {other:?}"
+            ))),
+        }
     }
 }

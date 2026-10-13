@@ -73,3 +73,29 @@ of the law is what it is.
 | [0029](0029-retain-automatic-runtime-worker-selection.md) | Retain automatic runtime worker selection | Accepted |
 | [0030](0030-shared-authenticated-session-activity.md) | Shared authenticated session activity | Accepted |
 | [0031](0031-handoff-transfers-keyupdate-capable-state.md) | Handoff transfers KeyUpdate-capable TLS state | Accepted |
+| [0033](0033-stress-and-virtual-machines-qualify-releases.md) | Stress and isolated QEMU system VMs qualify releases; WAN rollout evidence stays separate | Superseded by ADR 0034 |
+| [0034](0034-qualify-resource-ownership-and-lifetime.md) | Qualify resource ownership and lifetime | Accepted |
+| [0035](0035-remove-thread-sanitizer-gate.md) | Remove the ThreadSanitizer gate | Superseded by ADR 0057 for job presence |
+| [0036](0036-separate-native-and-qemu-qualification.md) | Separate native and QEMU qualification | Accepted |
+| [0037](0037-bound-descriptor-census-acquisition.md) | Bound descriptor census acquisition | Accepted |
+| [0038](0038-hosted-actions-are-primary-quality-gates.md) | Hosted Actions are the primary quality gates | Accepted |
+| [0039](0039-separate-active-census-from-recovery-ownership.md) | Separate active census from recovery ownership | Accepted |
+| [0040](0040-coherent-rtt-fault-workload.md) | Coherent RTT/loss fault workload | Accepted |
+| [0041](0041-ack-driven-landing-restart-census.md) | ACK-driven LANDING restart census | Accepted |
+| [0042](0042-four-cell-qemu-matrix-parallelism.md) | Four-cell QEMU parallelism via Actions matrix | Accepted |
+| [0043](0043-landing-restart-baseline-before-recovery.md) | LANDING restart baseline census before recovery admissions | Accepted |
+| [0044](0044-signal-safe-gha-pipefail-shell.md) | Signal-safe GitHub Actions pipefail shell | Accepted |
+| [0045](0045-collector-inherited-pipes-are-fixed-inventory.md) | Collector-inherited pipes are fixed inventory | Accepted |
+| [0046](0046-short-fault-baseline-before-recovery.md) | Short-fault baseline census before recovery admissions | Accepted |
+| [0047](0047-restart-ordering-uses-census-command-time.md) | Restart ordering uses census command time | Accepted |
+| [0048](0048-unix-socket-inode-census-ignores-unaddressable-rows.md) | Unix socket inode census ignores unaddressable rows | Accepted |
+| [0049](0049-guest-clock-end-offset-and-kvm-witness.md) | Guest clock end offset and kvm-clock witness | Accepted; `date --set` ban superseded by ADR 0050 |
+| [0050](0050-guest-clock-oneshot-realtime-bind.md) | One-shot guest REALTIME bind before kvm-clock witness | Accepted |
+| [0051](0051-scale-vm-rss-envelope-by-role-gib.md) | Scale VM RSS envelopes by role GiB | Accepted |
+| [0052](0052-libtest-lifecycle-stdout-is-pure-receipt.md) | Libtest lifecycle stdout is a pure receipt | Accepted |
+| [0053](0053-native-identity-environment-omits-host-kernel.md) | Native identity environment omits host_kernel | Accepted |
+| [0054](0054-frozen-exec-sibling-artifact.md) | Frozen executable sibling artifact | Accepted |
+| [0055](0055-relocated-openssl-uses-colocated-conf.md) | Relocated OpenSSL uses colocated OPENSSL_CONF | Accepted |
+| [0056](0056-cargo-dev-alias-uses-locked.md) | `cargo dev` alias uses `--locked` | Accepted |
+| [0057](0057-tsan-keeps-current-thread-vision-proofs.md) | ThreadSanitizer stays; Vision accumulation uses current_thread | Accepted |
+| [0058](0058-restart-ack-census-uses-clock-guard.md) | Restart ACK/census ordering uses clock_guard across guests | Accepted |

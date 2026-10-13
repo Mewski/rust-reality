@@ -9,6 +9,8 @@ mod handshake_read;
 mod idle;
 mod keys;
 mod messages;
+#[cfg(test)]
+mod openssl_interop;
 mod record;
 mod record_read;
 mod server_hello;

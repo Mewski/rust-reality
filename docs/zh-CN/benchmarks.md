@@ -134,11 +134,11 @@ EWMA、growth 与 shrink 计数。debug/instrumented run 可解释 phase，不�
 idle-age、burst、prebuilt-cover + warm-LANDING 组合、protected path 与 soak 是独立保留
 的 release artifact；不能从本聚焦 matrix 推断缺失证据。
 
-发布证据分三层：A 层是上述强制聚焦机制门禁，预算约 10–20 分钟；B 层是由
-`cargo dev deploy canary` 评估的强制约十分钟双 VPS 主动 canary；C 层是可选的
-数小时或整夜 soak。C 层仍可发现长期保持问题，但不再阻塞发布或下一开发 worktree。
-B 层内存门禁比较基线、burst 峰值和恢复后的 FD/thread/RSS 包络，不会从十分钟
-外推精确 MiB/hour，也不声称等价于长期证据。
+发布验收以[发布流程](release-process.md#分层证据)为准。A 层保留聚焦机制门禁；
+B 层要求重复压力／恢复与隔离多节点故障证据，QEMU 系统虚拟机可以达标，无需
+真实双 VPS。C 层长期 soak 可选。已有必需原生检查与资源阈值不变。操作次数
+不能模拟经过数个月，本地 VM 证据也不是 WAN 证据；见
+[ADR 0033](../adr/0033-stress-and-virtual-machines-qualify-releases.md)。
 
 ## v1.0.0 规范样本
 
@@ -234,7 +234,8 @@ PR head，数字 IPv4 -0.06%、数字 IPv6 +1.12%、规划 +0.44%，立即错误
 其中包含结构化 REALITY 认证目标；
 所有目标都进入有界、按时间计的 CI 分片，并有更深的定时预算。解析属性门禁仍覆盖
 最大请求的每个前缀以及每个位置的三种字节变异。受限 shell 本地运行只关闭 ptrace
-不支持的 LSan 泄漏检测；CI 保留泄漏检测，TSan 则覆盖重放重复竞态。
+不支持的 LSan 泄漏检测；CI 保留泄漏检测及常规重放重复竞态测试。
+ThreadSanitizer 仍为分支规则集要求的 Security 门禁（ADR 0057）；历史失败记录保留，不改写为通过。
 
 ## 方法规则（以及让早期数字作废的陷阱）
 
@@ -357,9 +358,9 @@ soak 期间的描述符、线程与 RSS 增长均平坦，零传输失败。
 - DNS 各阶段使用 loopback 上游（RTT 约 0 ms）。
 - 这些是本机测量结果，不是普遍性能结论。
 
-## v2.0.1 发布对比证据
+## v2.0.2 发布对比证据
 
-v2.0.1 保留下列历史对比表格及其原始产物、硬件归属。X25519 的结论是算术性能
+v2.0.2 保留下列历史对比表格及其原始产物、硬件归属。X25519 的结论是算术性能
 持平下的架构整合；cover class 改动测量的是缓存分类，不是新的 CPU 加速。
 密码学实现与 worker 选择由 ADR 0028、0029 确定。精确候选的正确性、打包、
 LOCAL_KVM、LOCAL_SYNTHETIC 和生产 canary 证据在 GitHub release/tracker 中绑定
@@ -630,3 +631,23 @@ cargo dev bench run --suite descriptor-pressure \
 
 更早的开发机样本（2026-08-03 的 Xray loopback 表格，以及自身结论为"与噪声
 无法区分"的 2 vCPU relay 基线）已被上述规范样本取代并从仓库移除。
+
+### 原生持续测试的资源门禁失败
+
+原生持续测试在创建全新输出目录后，无论成功或失败均写入
+`execution-terminal.json`。工作负载启动后，错误路径仍保留已采集的资源和
+分布式传输样本、源站日志，并在子进程仍受管理时尝试所有最终进程及可执行文件
+身份核验。`attempt-environment.json` 在环境准备前记录二进制身份及工作负载参数；
+`attempt-terminal.json` 单独记录工作负载和收尾错误。准备阶段失败明确标记最终
+核验尚未到达。证据收尾失败不会覆盖原始工作负载错误。
+
+资源拒绝还会写出 `ok=false` 的 `soak-summary.json`，包含失败范围及聚合、
+各进程指标。这些失败不会发布仅用于成功运行的 `environment.json` 和
+`completion.json`。进程被中断可能留下不完整证据；缺失终态记录绝不代表通过。
+
+原生资源验收使用 `benchmarks/contracts/stability.json` 所有权契约。在负载开始
+之前固定每个进程的描述符清单及实际资源容量；每轮及固定的 5/60/180 秒恢复
+检查点均保留原始观察和归一化所有权判定。恢复后，未打开描述符的预留许可只能
+属于监听器等待中的 accept。仍强制执行汇总及各进程 RSS +32 MiB、HWM +64 MiB、
+线程 +8 包络；RSS/PSS 斜率及 FD 增量只作为诊断。所有权证据缺失或不一致时
+资格认证失败。CI 在失败后保留这些不含秘密的观察及最终身份核验尝试。

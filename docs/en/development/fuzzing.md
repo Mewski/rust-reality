@@ -28,6 +28,8 @@ sharded smoke passes over all targets on every PR. The current set covers:
 - REALITY authentication round trip and session-engine semantics
   (`reality_auth_round_trip`, `session_semantics`).
 
+- Strict stability evidence, required-check child execution, native interoperability/mechanism/descriptor-pressure, package execution/tier metadata, CI/full-gate/libtest and VM clock/kernel/startup/terminal/fault-action receipts, netem observations/state, product logs, origin upload receipts, fixed IPv4 SOCKS echo replies and offline ownership evaluation (`stability_evidence`); the target compiles the maintained tooling parser and evaluator directly, without linking tooling into the production binary.
+
 ## Commands
 
 ```shell
@@ -47,3 +49,5 @@ directly (`cargo fuzz run <target>`) against `fuzz/`.
 - Structured round-trip targets (encode → decode equality, bitflip-must-fail)
   are preferred where a legitimate producer exists; raw-input targets where the
   bytes come from the network.
+
+The `nested_tls_prefix` target checks destination TLS header-prefix classification at every fragment boundary against the complete-header predicate. Async open-origin progress and pending-read cancellation are covered by socket regression tests.

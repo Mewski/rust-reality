@@ -52,7 +52,7 @@ enum OpenedRecordOutcome {
 }
 
 struct KeyUpdateCoordination {
-    /// A response restored after a canceled write or transferred through Handoff.
+    /// A response obligation transferred through Handoff.
     response_pending: AtomicBool,
     /// A requested update authenticated by the reader for the next output record.
     response_observed: AtomicBool,
@@ -64,6 +64,14 @@ impl KeyUpdateCoordination {
             response_pending: AtomicBool::new(response_pending),
             response_observed: AtomicBool::new(false),
         }
+    }
+
+    fn take_response(&self) -> bool {
+        let pending = self.response_pending.load(Ordering::Acquire)
+            && self.response_pending.swap(false, Ordering::AcqRel);
+        let observed = self.response_observed.load(Ordering::Acquire)
+            && self.response_observed.swap(false, Ordering::AcqRel);
+        pending | observed
     }
 }
 
@@ -124,36 +132,37 @@ impl KeyUpdateReassembly {
     }
 }
 
-struct PendingKeyUpdateResponse<'state> {
-    state: Option<&'state AtomicBool>,
+/// Sealing consumes a nonce before socket I/O. Only a complete write may leave
+/// the direction usable, including when a future is dropped without an error.
+struct SealedWrite<'records> {
+    records: &'records mut super::Tls13RecordLayer,
+    armed: bool,
 }
 
-impl<'state> PendingKeyUpdateResponse<'state> {
-    fn take(coordination: &'state KeyUpdateCoordination) -> Self {
-        let pending = &coordination.response_pending;
-        let pending_request =
-            pending.load(Ordering::Acquire) && pending.swap(false, Ordering::AcqRel);
-        let observed = &coordination.response_observed;
-        let observed_request =
-            observed.load(Ordering::Acquire) && observed.swap(false, Ordering::AcqRel);
-        Self {
-            state: (pending_request | observed_request).then_some(pending),
-        }
+impl<'records> SealedWrite<'records> {
+    fn new(records: &'records mut super::Tls13RecordLayer) -> Result<Self, TlsApplicationIoError> {
+        records
+            .ensure_write_ready()
+            .map_err(TlsApplicationIoError::Record)?;
+        Ok(Self {
+            records,
+            armed: false,
+        })
     }
 
-    const fn was_requested(&self) -> bool {
-        self.state.is_some()
+    fn arm(&mut self) {
+        self.armed = true;
     }
 
-    fn complete(&mut self) {
-        self.state = None;
+    fn complete(mut self) {
+        self.armed = false;
     }
 }
 
-impl Drop for PendingKeyUpdateResponse<'_> {
+impl Drop for SealedWrite<'_> {
     fn drop(&mut self) {
-        if let Some(state) = self.state {
-            state.store(true, Ordering::Release);
+        if self.armed {
+            self.records.fail_write();
         }
     }
 }
@@ -333,6 +342,10 @@ pub struct TlsApplicationReader<R> {
 }
 
 /// Server-to-client TLS application records with one reusable ciphertext buffer.
+///
+/// Once sealing begins, cancellation, partial-write failure, or timeout
+/// permanently invalidates this direction. Later writes and Handoff record
+/// exports fail without emitting additional ciphertext.
 pub struct TlsApplicationWriter<W> {
     io: W,
     records: super::Tls13RecordLayer,
@@ -398,10 +411,10 @@ impl<W> TlsApplicationWriter<W> {
 
     /// Consumes the writer at a session-handoff boundary.
     ///
-    /// Writes are record-synchronous, so the writer is always at a record
-    /// boundary between awaited calls; the returned record layer carries the
-    /// exact server-direction sequence. The final flag preserves an outstanding
-    /// peer request for a server KeyUpdate across the ownership transfer.
+    /// Successful writes leave an exact record boundary. An interrupted sealed
+    /// write permanently invalidates the returned record layer, so its export
+    /// and subsequent use fail closed. The final flag preserves an outstanding
+    /// peer request for a server KeyUpdate across a valid ownership transfer.
     #[must_use]
     pub fn into_handoff_parts(self) -> (W, super::Tls13RecordLayer, bool) {
         let key_update_response_pending = self
@@ -607,6 +620,8 @@ where
     ///
     /// The reusable ciphertext buffer is retained by the connection. Empty writes
     /// produce no record, and each record gets its own idle window.
+    /// An interrupted sealed write permanently invalidates the write direction,
+    /// including when its future is canceled. Subsequent writes fail closed.
     ///
     /// # Errors
     ///
@@ -639,6 +654,7 @@ where
             self.tls.server_records_mut(),
             &mut self.write_record,
             &mut self.idle,
+            &self.key_update_coordination,
             timeout,
         )
         .await
@@ -933,6 +949,9 @@ where
     where
         R: AsyncRead + Unpin,
     {
+        self.records
+            .ensure_write_ready()
+            .map_err(TlsApplicationIoError::Record)?;
         self.idle
             .reset(timeout)
             .map_err(|_| TlsApplicationIoError::Timeout)?;
@@ -957,10 +976,12 @@ where
                 .reset(timeout)
                 .map_err(|_| TlsApplicationIoError::Timeout)?;
         }
-        let record_len = self
+        let mut write = SealedWrite::new(&mut self.records)?;
+        let record_len = write
             .records
             .seal_filled(ContentType::ApplicationData, read, &mut self.write_record)
             .map_err(TlsApplicationIoError::Record)?;
+        write.arm();
         let record = self
             .write_record
             .get(..record_len)
@@ -971,6 +992,7 @@ where
             .write_all(&mut self.io, record)
             .await
             .map_err(idle_failure)?;
+        write.complete();
         Ok(read)
     }
 
@@ -1010,6 +1032,9 @@ where
     where
         R: VectoredRead,
     {
+        self.records
+            .ensure_write_ready()
+            .map_err(TlsApplicationIoError::Record)?;
         // Mode selection keys on capacity, not length: `seal_into` and
         // `seal_assembled` clear the shared buffer, so a reduced length does
         // not mean the batched layout was never allocated.
@@ -1046,6 +1071,7 @@ where
         if read == 0 {
             return Ok(0);
         }
+        let mut write = SealedWrite::new(&mut self.records)?;
         let mut sealed_len = 0_usize;
         let mut wire_start = 0_usize;
         let mut remaining = read;
@@ -1061,7 +1087,7 @@ where
                     .key_update_coordination
                     .response_observed
                     .load(Ordering::Acquire)
-                || self.records.needs_key_update()
+                || write.records.needs_key_update()
             {
                 if wire_start < sealed_len {
                     let wire = self.write_record.get(wire_start..sealed_len).ok_or(
@@ -1075,7 +1101,7 @@ where
                 }
                 if write_key_update_if_needed(
                     &mut self.io,
-                    &mut self.records,
+                    write.records,
                     &mut self.idle,
                     self.key_update_coordination.as_ref(),
                     timeout,
@@ -1095,10 +1121,11 @@ where
                 .ok_or(TlsApplicationIoError::Record(
                     Tls13RecordError::InvalidLength,
                 ))?;
-            let record_len = self
+            let record_len = write
                 .records
                 .seal_filled(ContentType::ApplicationData, filled, slot_slice)
                 .map_err(TlsApplicationIoError::Record)?;
+            write.arm();
             sealed_len += record_len;
             remaining -= filled;
         }
@@ -1112,6 +1139,7 @@ where
             .write_all(&mut self.io, wire)
             .await
             .map_err(idle_failure)?;
+        write.complete();
         Ok(read)
     }
 
@@ -1144,7 +1172,9 @@ where
         self.idle
             .reset(timeout)
             .map_err(|_| TlsApplicationIoError::Timeout)?;
-        self.records
+        let mut write = SealedWrite::new(&mut self.records)?;
+        write
+            .records
             .seal_assembled(
                 ContentType::ApplicationData,
                 plaintext_len,
@@ -1153,11 +1183,14 @@ where
                 assemble,
             )
             .map_err(TlsApplicationIoError::Record)?;
+        write.arm();
         let record = self.write_record.as_slice();
         self.idle
             .write_all(&mut self.io, record)
             .await
-            .map_err(idle_failure)
+            .map_err(idle_failure)?;
+        write.complete();
+        Ok(())
     }
 
     /// Sends an authenticated `close_notify` and shuts down the transport writer.
@@ -1171,6 +1204,7 @@ where
             &mut self.records,
             &mut self.write_record,
             &mut self.idle,
+            self.key_update_coordination.as_ref(),
             timeout,
         )
         .await
@@ -1307,10 +1341,19 @@ async fn write_key_update_if_needed<W>(
 where
     W: AsyncWrite + Unpin,
 {
-    let mut pending_response = PendingKeyUpdateResponse::take(key_update_coordination);
-    if !pending_response.was_requested() && !records.needs_key_update() {
+    records
+        .ensure_write_ready()
+        .map_err(TlsApplicationIoError::Record)?;
+    let requested = key_update_coordination
+        .response_pending
+        .load(Ordering::Acquire)
+        || key_update_coordination
+            .response_observed
+            .load(Ordering::Acquire);
+    if !requested && !records.needs_key_update() {
         return Ok(false);
     }
+    let mut write = SealedWrite::new(records)?;
 
     idle.reset(timeout)
         .map_err(|_| TlsApplicationIoError::Timeout)?;
@@ -1321,23 +1364,27 @@ where
             Tls13RecordError::InvalidLength,
         ))?
         .copy_from_slice(&KEY_UPDATE_RESPONSE);
-    let record_len = records
+    let record_len = write
+        .records
         .seal_filled(
             ContentType::Handshake,
             KEY_UPDATE_MESSAGE_LEN,
             &mut response,
         )
         .map_err(TlsApplicationIoError::Record)?;
+    write.arm();
+    key_update_coordination.take_response();
     let record = response
         .get(..record_len)
         .ok_or(TlsApplicationIoError::Record(
             Tls13RecordError::InvalidLength,
         ))?;
     idle.write_all(io, record).await.map_err(idle_failure)?;
-    records
+    write
+        .records
         .update_traffic_secret()
         .map_err(TlsApplicationIoError::Record)?;
-    pending_response.complete();
+    write.complete();
     Ok(true)
 }
 
@@ -1353,6 +1400,9 @@ async fn write_application_data<W>(
 where
     W: AsyncWrite + Unpin,
 {
+    records
+        .ensure_write_ready()
+        .map_err(TlsApplicationIoError::Record)?;
     let mut record_count = 0_u64;
     for chunk in plaintext.chunks(MAX_PLAINTEXT_LEN) {
         write_key_update_if_needed(io, records, idle, key_update_coordination, timeout).await?;
@@ -1382,23 +1432,29 @@ async fn shutdown_tls_writer<W>(
     records: &mut super::Tls13RecordLayer,
     write_record: &mut Vec<u8>,
     idle: &mut IdleDeadline,
+    key_update_coordination: &KeyUpdateCoordination,
     timeout: Duration,
 ) -> Result<(), TlsApplicationIoError>
 where
     W: AsyncWrite + Unpin,
 {
+    write_key_update_if_needed(io, records, idle, key_update_coordination, timeout).await?;
+    let mut write = SealedWrite::new(records)?;
     idle.reset(timeout)
         .map_err(|_| TlsApplicationIoError::Timeout)?;
     write_content(
         io,
-        records,
+        write.records,
         write_record,
         idle,
         ContentType::Alert,
         &[ALERT_LEVEL_WARNING, ALERT_CLOSE_NOTIFY],
     )
     .await?;
-    idle.shutdown(io).await.map_err(idle_failure)
+    write.arm();
+    idle.shutdown(io).await.map_err(idle_failure)?;
+    write.complete();
+    Ok(())
 }
 
 async fn write_content<W>(
@@ -1412,10 +1468,17 @@ async fn write_content<W>(
 where
     W: AsyncWrite + Unpin,
 {
-    records
+    let mut write = SealedWrite::new(records)?;
+    write
+        .records
         .seal_into(content_type, plaintext, 0, write_record)
         .map_err(TlsApplicationIoError::Record)?;
-    idle.write_all(io, write_record).await.map_err(idle_failure)
+    write.arm();
+    idle.write_all(io, write_record)
+        .await
+        .map_err(idle_failure)?;
+    write.complete();
+    Ok(())
 }
 
 /// Maps an idle-guarded operation failure to the application I/O error.
@@ -1477,8 +1540,8 @@ mod tests {
     use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf, duplex};
 
     use super::{
-        KEY_UPDATE_REQUESTED, KEY_UPDATE_RESPONSE, KeyUpdateCoordination, PendingKeyUpdateResponse,
-        TlsApplicationIo, TlsApplicationIoError, VectoredRead, resume_application_halves,
+        KEY_UPDATE_REQUESTED, KEY_UPDATE_RESPONSE, KeyUpdateCoordination, TlsApplicationIo,
+        TlsApplicationIoError, VectoredRead, resume_application_halves,
     };
     use crate::protocol::reality::tls13::record::{
         BATCHED_SLOT_COUNT, BATCHED_WIRE_CAPACITY, RECORD_SLOT_WIRE_CAPACITY,
@@ -1619,21 +1682,6 @@ mod tests {
             .seal_into(content_type, plaintext, 0, &mut record)
             .expect("test record must seal");
         record
-    }
-
-    #[test]
-    fn cancelled_key_update_write_restores_the_pending_response() {
-        let coordination = KeyUpdateCoordination::new(false);
-        coordination
-            .response_observed
-            .store(true, Ordering::Release);
-        {
-            let response = PendingKeyUpdateResponse::take(&coordination);
-            assert!(response.was_requested());
-            assert!(!coordination.response_observed.load(Ordering::Acquire));
-            assert!(!coordination.response_pending.load(Ordering::Acquire));
-        }
-        assert!(coordination.response_pending.load(Ordering::Acquire));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2555,6 +2603,632 @@ mod tests {
         fn poll_shutdown(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
             Poll::Ready(Ok(()))
         }
+    }
+
+    #[derive(Clone, Copy)]
+    enum InterruptedWrite {
+        Pending,
+        Error,
+        Complete,
+    }
+
+    #[derive(Clone)]
+    struct PartialWriteSink {
+        state: Arc<Mutex<(Vec<u8>, usize, InterruptedWrite)>>,
+    }
+
+    impl PartialWriteSink {
+        fn new(prefix: usize, outcome: InterruptedWrite) -> Self {
+            Self {
+                state: Arc::new(Mutex::new((Vec::new(), prefix, outcome))),
+            }
+        }
+
+        fn complete(&self) {
+            self.state.lock().expect("sink state").2 = InterruptedWrite::Complete;
+        }
+
+        fn wire(&self) -> Vec<u8> {
+            self.state.lock().expect("sink state").0.clone()
+        }
+    }
+
+    impl AsyncWrite for PartialWriteSink {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+            buffer: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let mut state = self.state.lock().expect("sink state");
+            let length = buffer.len().min(state.1);
+            if length > 0 {
+                state.0.extend_from_slice(&buffer[..length]);
+                state.1 -= length;
+                return Poll::Ready(Ok(length));
+            }
+            match state.2 {
+                InterruptedWrite::Pending => Poll::Pending,
+                InterruptedWrite::Error => {
+                    Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe)))
+                }
+                InterruptedWrite::Complete => {
+                    state.0.extend_from_slice(buffer);
+                    Poll::Ready(Ok(buffer.len()))
+                }
+            }
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_partial_key_update_rejects_retry() {
+        let (established, _client_write, _client_read) = key_update_states();
+        let sink = PartialWriteSink::new(7, InterruptedWrite::Pending);
+        let (_reader, mut writer) = resume_application_halves(
+            tokio::io::empty(),
+            Vec::new(),
+            sink.clone(),
+            established,
+            true,
+        );
+        let mut write = Box::pin(writer.write_application(b"reply", TIMEOUT));
+        poll_fn(|context| {
+            assert!(write.as_mut().poll(context).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(write);
+        let partial = sink.wire();
+        assert_eq!(
+            partial.len(),
+            7,
+            "the peer received an incomplete KeyUpdate"
+        );
+        sink.complete();
+        assert!(
+            writer.write_application(b"retry", TIMEOUT).await.is_err(),
+            "a canceled sealed record must permanently close the TLS write direction"
+        );
+        assert_eq!(sink.wire(), partial, "retry must not emit more ciphertext");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_partial_key_update_rejects_handoff_export() {
+        let (established, _client_write, _client_read) = key_update_states();
+        let sink = PartialWriteSink::new(7, InterruptedWrite::Pending);
+        let (_reader, mut writer) =
+            resume_application_halves(tokio::io::empty(), Vec::new(), sink, established, true);
+        let mut write = Box::pin(writer.write_application(b"reply", TIMEOUT));
+        poll_fn(|context| {
+            assert!(write.as_mut().poll(context).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(write);
+        let (_transport, records, _pending) = writer.into_handoff_parts();
+        assert!(
+            records.into_exported_state().is_err(),
+            "ambiguous ciphertext must not be represented as a valid Handoff boundary"
+        );
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum WritePath {
+        Copied,
+        Assembled,
+        ReadFrom,
+        Batched,
+        Shutdown,
+    }
+
+    const WRITE_PATHS: [WritePath; 5] = [
+        WritePath::Copied,
+        WritePath::Assembled,
+        WritePath::ReadFrom,
+        WritePath::Batched,
+        WritePath::Shutdown,
+    ];
+
+    async fn write_path(
+        writer: &mut super::TlsApplicationWriter<PartialWriteSink>,
+        path: WritePath,
+    ) -> Result<(), TlsApplicationIoError> {
+        match path {
+            WritePath::Copied => writer
+                .write_application(b"reply", TIMEOUT)
+                .await
+                .map(|_| ()),
+            WritePath::Assembled => {
+                writer
+                    .write_assembled(5, |region| region.copy_from_slice(b"reply"), TIMEOUT)
+                    .await
+            }
+            WritePath::ReadFrom => {
+                let mut source = ReplaySource::new(b"reply".to_vec(), usize::MAX);
+                writer
+                    .write_application_read_from(&mut source, TIMEOUT)
+                    .await
+                    .map(|_| ())
+            }
+            WritePath::Batched => {
+                let mut source = ReplaySource::new(vec![0x6a; 2 * MAX_PLAINTEXT_LEN], usize::MAX);
+                writer
+                    .write_application_read_from_batched(&mut source, TIMEOUT)
+                    .await
+                    .map(|_| ())
+            }
+            WritePath::Shutdown => writer.shutdown(TIMEOUT).await,
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn interrupted_records_reject_every_write_path_and_export() {
+        // Cover incomplete application records, incomplete KeyUpdates, and
+        // complete KeyUpdates followed by an incomplete next-generation record.
+        for trigger in 0..3 {
+            let prefixes: &[usize] = if trigger != 0 {
+                &[0, 7, super::KEY_UPDATE_RECORD_WIRE_LEN + 7]
+            } else {
+                &[0, 7]
+            };
+            for &prefix in prefixes {
+                for path in WRITE_PATHS {
+                    for interruption in 0..3 {
+                        let (mut established, _client_write, _client_read) = key_update_states();
+                        if trigger == 2 {
+                            established.server_records_mut().set_test_key_usage_limit(2);
+                        }
+                        let outcome = if interruption == 1 {
+                            InterruptedWrite::Error
+                        } else {
+                            InterruptedWrite::Pending
+                        };
+                        let sink = PartialWriteSink::new(0, InterruptedWrite::Complete);
+                        let (_reader, mut writer) = resume_application_halves(
+                            tokio::io::empty(),
+                            Vec::new(),
+                            sink.clone(),
+                            established,
+                            trigger == 1,
+                        );
+                        if trigger == 2 {
+                            writer
+                                .write_application(b"warmup", TIMEOUT)
+                                .await
+                                .expect("warmup");
+                        }
+                        *sink.state.lock().expect("sink state") = (Vec::new(), prefix, outcome);
+                        grow_batched_record_storage(&mut writer.write_record)
+                            .expect("batch storage");
+                        let mut write = Box::pin(write_path(&mut writer, path));
+                        if interruption == 1 {
+                            assert!(matches!(
+                                write.as_mut().await,
+                                Err(TlsApplicationIoError::Io(_))
+                            ));
+                        } else {
+                            poll_fn(|context| {
+                                assert!(write.as_mut().poll(context).is_pending());
+                                Poll::Ready(())
+                            })
+                            .await;
+                            if interruption == 2 {
+                                tokio::time::advance(TIMEOUT).await;
+                                assert!(matches!(
+                                    write.as_mut().await,
+                                    Err(TlsApplicationIoError::Timeout)
+                                ));
+                            }
+                        }
+                        drop(write);
+                        let partial = sink.wire();
+                        assert_eq!(partial.len(), prefix, "{path:?}");
+                        sink.complete();
+                        for retry in WRITE_PATHS {
+                            assert!(
+                                write_path(&mut writer, retry).await.is_err(),
+                                "{path:?} interruption must reject {retry:?} retry"
+                            );
+                        }
+                        assert!(
+                            writer.write_application(b"", TIMEOUT).await.is_err(),
+                            "empty writes must not hide a failed direction"
+                        );
+                        assert_eq!(sink.wire(), partial, "failed retries must write nothing");
+                        let (_transport, records, _pending) = writer.into_handoff_parts();
+                        assert!(records.into_exported_state().is_err(), "{path:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn complete_partial_writes_decrypt_for_every_update_write_path() {
+        for proactive in [false, true] {
+            for path in WRITE_PATHS {
+                let (mut established, _client_write, mut client_read) = key_update_states();
+                if proactive {
+                    established.server_records_mut().set_test_key_usage_limit(2);
+                }
+                let sink = PartialWriteSink::new(0, InterruptedWrite::Complete);
+                let (_reader, mut writer) = resume_application_halves(
+                    tokio::io::empty(),
+                    Vec::new(),
+                    sink.clone(),
+                    established,
+                    !proactive,
+                );
+                if proactive {
+                    writer
+                        .write_application(b"warmup", TIMEOUT)
+                        .await
+                        .expect("warmup");
+                    let mut warmup = sink.wire();
+                    let opened = client_read
+                        .open_in_place(&mut warmup)
+                        .expect("warmup decrypts");
+                    assert_eq!(opened.plaintext(), b"warmup");
+                }
+                *sink.state.lock().expect("sink state") =
+                    (Vec::new(), 7, InterruptedWrite::Complete);
+                grow_batched_record_storage(&mut writer.write_record).expect("batch storage");
+                write_path(&mut writer, path)
+                    .await
+                    .expect("complete partial writes");
+                let wire = sink.wire();
+                let records = split_wire_records(&wire);
+                let mut application = Vec::new();
+                let mut updates = 0;
+                for mut record in records {
+                    let opened = client_read
+                        .open_in_place(&mut record)
+                        .expect("peer decrypts");
+                    match opened.content_type() {
+                        ContentType::Handshake => {
+                            assert_eq!(opened.plaintext(), KEY_UPDATE_RESPONSE);
+                            updates += 1;
+                            client_read
+                                .update_traffic_secret()
+                                .expect("peer updates key");
+                        }
+                        ContentType::ApplicationData => {
+                            application.extend_from_slice(opened.plaintext());
+                        }
+                        ContentType::Alert => {
+                            assert!(matches!(path, WritePath::Shutdown));
+                            assert_eq!(opened.plaintext(), &[1, 0]);
+                        }
+                        content_type => panic!("unexpected content type {content_type:?}"),
+                    }
+                }
+                assert!(updates > 0, "{path:?} must send an update");
+                match path {
+                    WritePath::Batched => {
+                        assert_eq!(application, vec![0x6a; 2 * MAX_PLAINTEXT_LEN])
+                    }
+                    WritePath::Shutdown => assert!(application.is_empty()),
+                    _ => assert_eq!(application, b"reply"),
+                }
+                let (_transport, records, pending) = writer.into_handoff_parts();
+                assert!(!pending);
+                assert!(records.into_exported_state().is_ok(), "{path:?}");
+            }
+        }
+    }
+
+    impl AsyncRead for PartialWriteSink {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+            _output: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn interrupted_unsplit_writes_remain_invalid_after_split() {
+        for trigger in 0..3 {
+            for shutdown in [false, true] {
+                for interruption in 0..3 {
+                    let (mut established, _client_write, _client_read) = key_update_states();
+                    if trigger == 2 {
+                        established.server_records_mut().set_test_key_usage_limit(2);
+                    }
+                    let sink = PartialWriteSink::new(0, InterruptedWrite::Complete);
+                    let mut application = TlsApplicationIo::new(sink.clone(), established);
+                    if trigger == 2 {
+                        application
+                            .write_application(b"warmup", TIMEOUT)
+                            .await
+                            .expect("warmup");
+                    }
+                    application
+                        .key_update_coordination
+                        .response_pending
+                        .store(trigger == 1, Ordering::Release);
+                    let outcome = if interruption == 1 {
+                        InterruptedWrite::Error
+                    } else {
+                        InterruptedWrite::Pending
+                    };
+                    *sink.state.lock().expect("sink state") = (Vec::new(), 7, outcome);
+                    let mut write = Box::pin(async {
+                        if shutdown {
+                            application.shutdown(TIMEOUT).await
+                        } else {
+                            application
+                                .write_application(b"reply", TIMEOUT)
+                                .await
+                                .map(|_| ())
+                        }
+                    });
+                    if interruption == 1 {
+                        assert!(matches!(
+                            write.as_mut().await,
+                            Err(TlsApplicationIoError::Io(_))
+                        ));
+                    } else {
+                        poll_fn(|context| {
+                            assert!(write.as_mut().poll(context).is_pending());
+                            Poll::Ready(())
+                        })
+                        .await;
+                        if interruption == 2 {
+                            tokio::time::advance(TIMEOUT).await;
+                            assert!(matches!(
+                                write.as_mut().await,
+                                Err(TlsApplicationIoError::Timeout)
+                            ));
+                        }
+                    }
+                    drop(write);
+                    let partial = sink.wire();
+                    assert_eq!(partial.len(), 7);
+                    sink.complete();
+                    assert!(
+                        application
+                            .write_application(b"retry", TIMEOUT)
+                            .await
+                            .is_err()
+                    );
+                    assert!(application.shutdown(TIMEOUT).await.is_err());
+                    let (_reader, mut writer) = application.into_split();
+                    assert!(
+                        writer
+                            .write_application(b"after split", TIMEOUT)
+                            .await
+                            .is_err()
+                    );
+                    let (_transport, records, _pending) = writer.into_handoff_parts();
+                    assert!(records.into_exported_state().is_err());
+                    assert_eq!(sink.wire(), partial);
+                }
+            }
+        }
+    }
+
+    struct InterruptedShutdownSink {
+        inner: PartialWriteSink,
+        outcome: InterruptedWrite,
+    }
+
+    impl AsyncWrite for InterruptedShutdownSink {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            context: &mut Context<'_>,
+            buffer: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Pin::new(&mut self.inner).poll_write(context, buffer)
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+            match self.outcome {
+                InterruptedWrite::Pending => Poll::Pending,
+                InterruptedWrite::Error => {
+                    Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe)))
+                }
+                InterruptedWrite::Complete => Poll::Ready(Ok(())),
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn interrupted_transport_shutdown_rejects_retry_and_export() {
+        for interruption in 0..3 {
+            let (established, _client_write, mut client_read) = key_update_states();
+            let sink = PartialWriteSink::new(7, InterruptedWrite::Complete);
+            let transport = InterruptedShutdownSink {
+                inner: sink.clone(),
+                outcome: if interruption == 1 {
+                    InterruptedWrite::Error
+                } else {
+                    InterruptedWrite::Pending
+                },
+            };
+            let (_reader, mut writer) = resume_application_halves(
+                tokio::io::empty(),
+                Vec::new(),
+                transport,
+                established,
+                true,
+            );
+            let mut shutdown = Box::pin(writer.shutdown(TIMEOUT));
+            if interruption == 1 {
+                assert!(matches!(
+                    shutdown.as_mut().await,
+                    Err(TlsApplicationIoError::Io(_))
+                ));
+            } else {
+                poll_fn(|context| {
+                    assert!(shutdown.as_mut().poll(context).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                if interruption == 2 {
+                    tokio::time::advance(TIMEOUT).await;
+                    assert!(matches!(
+                        shutdown.as_mut().await,
+                        Err(TlsApplicationIoError::Timeout)
+                    ));
+                }
+            }
+            drop(shutdown);
+            let wire = sink.wire();
+            let mut records = split_wire_records(&wire);
+            assert_eq!(records.len(), 2);
+            let update = client_read
+                .open_in_place(&mut records[0])
+                .expect("update decrypts");
+            assert_eq!(update.plaintext(), KEY_UPDATE_RESPONSE);
+            client_read.update_traffic_secret().expect("peer updates");
+            let alert = client_read
+                .open_in_place(&mut records[1])
+                .expect("alert decrypts");
+            assert_eq!(alert.content_type(), ContentType::Alert);
+            assert_eq!(alert.plaintext(), &[1, 0]);
+            assert!(writer.write_application(b"retry", TIMEOUT).await.is_err());
+            assert!(writer.shutdown(TIMEOUT).await.is_err());
+            assert_eq!(sink.wire(), wire);
+            let (_transport, records, _pending) = writer.into_handoff_parts();
+            assert!(records.into_exported_state().is_err());
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancellation_before_plaintext_is_sealed_keeps_writer_usable() {
+        let (established, _client_write, mut client_read) = key_update_states();
+        let sink = PartialWriteSink::new(7, InterruptedWrite::Complete);
+        let (_reader, mut writer) = resume_application_halves(
+            tokio::io::empty(),
+            Vec::new(),
+            sink.clone(),
+            established,
+            false,
+        );
+        let (_source_peer, mut source) = duplex(128);
+        let mut read = Box::pin(writer.write_application_read_from(&mut source, TIMEOUT));
+        poll_fn(|context| {
+            assert!(read.as_mut().poll(context).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(read);
+        writer
+            .write_application(b"reply", TIMEOUT)
+            .await
+            .expect("safe retry");
+        let mut wire = sink.wire();
+        let opened = client_read.open_in_place(&mut wire).expect("peer decrypts");
+        assert_eq!(opened.plaintext(), b"reply");
+        let (_transport, records, _pending) = writer.into_handoff_parts();
+        assert!(records.into_exported_state().is_ok());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pre_seal_failures_preserve_pending_update_and_valid_sequence() {
+        let (established, _client_write, mut client_read) = key_update_states();
+        let sink = PartialWriteSink::new(7, InterruptedWrite::Complete);
+        let (_reader, mut writer) = resume_application_halves(
+            tokio::io::empty(),
+            Vec::new(),
+            sink.clone(),
+            established,
+            true,
+        );
+        assert!(matches!(
+            writer.write_application(b"reply", Duration::MAX).await,
+            Err(TlsApplicationIoError::Timeout)
+        ));
+        assert!(sink.wire().is_empty());
+        assert!(matches!(
+            writer
+                .write_assembled(
+                    MAX_PLAINTEXT_LEN + 1,
+                    |_| panic!("must not assemble"),
+                    TIMEOUT
+                )
+                .await,
+            Err(TlsApplicationIoError::Record(
+                Tls13RecordError::InvalidLength
+            ))
+        ));
+        writer
+            .write_application(b"reply", TIMEOUT)
+            .await
+            .expect("safe retry");
+        let mut records = split_wire_records(&sink.wire());
+        assert_eq!(records.len(), 2);
+        let update = client_read
+            .open_in_place(&mut records[0])
+            .expect("pending update decrypts");
+        assert_eq!(update.plaintext(), KEY_UPDATE_RESPONSE);
+        client_read.update_traffic_secret().expect("peer updates");
+        let application = client_read
+            .open_in_place(&mut records[1])
+            .expect("retry decrypts");
+        assert_eq!(application.plaintext(), b"reply");
+        let (_transport, records, pending) = writer.into_handoff_parts();
+        assert!(!pending);
+        assert!(records.into_exported_state().is_ok());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn traffic_rotation_failure_after_delivered_update_invalidates_writer() {
+        let (mut established, _client_write, mut client_read) = key_update_states();
+        let suite = CipherSuite::Aes128GcmSha256;
+        let schedule = schedule(suite);
+        let secrets = schedule
+            .application_traffic_secrets(&suite.hash().digest(b"server finished transcript"))
+            .expect("application secrets");
+        let keys = schedule
+            .traffic_keys(secrets.server())
+            .expect("application keys");
+        // Derived-key-only layers cannot rotate. Exercise the real error after
+        // delivery without altering the peer's old-generation decryption keys.
+        *established.server_records_mut() = Tls13RecordLayer::new(suite, keys).expect("old key");
+        let sink = PartialWriteSink::new(7, InterruptedWrite::Complete);
+        let (_reader, mut writer) = resume_application_halves(
+            tokio::io::empty(),
+            Vec::new(),
+            sink.clone(),
+            established,
+            true,
+        );
+        assert!(matches!(
+            writer.write_application(b"reply", TIMEOUT).await,
+            Err(TlsApplicationIoError::Record(
+                Tls13RecordError::KeyUpdateUnavailable
+            ))
+        ));
+        let ciphertext = sink.wire();
+        let mut wire = ciphertext.clone();
+        let update = client_read
+            .open_in_place(&mut wire)
+            .expect("delivered update decrypts");
+        assert_eq!(update.plaintext(), KEY_UPDATE_RESPONSE);
+        assert!(matches!(
+            writer.write_application(b"retry", TIMEOUT).await,
+            Err(TlsApplicationIoError::Record(Tls13RecordError::WriteFailed))
+        ));
+        assert_eq!(sink.wire(), ciphertext);
+        let (_transport, records, _pending) = writer.into_handoff_parts();
+        assert!(matches!(
+            records.into_exported_state(),
+            Err(Tls13RecordError::WriteFailed)
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]

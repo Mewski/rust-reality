@@ -12,6 +12,8 @@ use std::{
 
 use serde::Serialize;
 
+use super::FailureDetail;
+
 use crate::config::node::log::{FileLogConfig, LogConfig, LogLevel, LogOutput};
 
 const MAX_MANAGED_ROTATIONS: u16 = 64;
@@ -80,6 +82,61 @@ pub struct BackendStatus {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum LogEvent {
+    /// Debug proof that an immutable generation has released its final owner.
+    GenerationRetired {
+        /// Retired immutable generation.
+        generation: u64,
+    },
+    /// Debug snapshot of listener-owned tasks, including completed unreaped tasks.
+    ConnectionTaskOwnership {
+        /// Bound listener, already present in startup diagnostics.
+        address: SocketAddr,
+        /// Tasks still owned by this listener's join set.
+        tracked_tasks: usize,
+    },
+    /// Off-path debug snapshot of current process resource ownership.
+    ResourceOwnership {
+        /// In-flight authentication handshakes.
+        handshakes: u64,
+        /// In-flight cover fallback operations.
+        fallbacks: u64,
+        /// In-flight cryptographic operations.
+        crypto_operations: u64,
+        /// DNS permits held until the underlying lookup finishes.
+        dns_lookups: u64,
+        /// Accepted zero-byte sockets still owning pre-auth-idle permits.
+        pre_auth_idle_connections: u64,
+        /// Immutable capacity for these unauthenticated idle sockets.
+        pre_auth_idle_capacity: u64,
+        /// Immutable descriptor admission capacity.
+        fd_capacity: u64,
+        /// Immutable idle pipe retention bound, when supported.
+        pipe_pair_capacity: Option<u64>,
+        /// Process-wide ready plus connecting warm-socket capacity.
+        warm_socket_capacity: u64,
+        /// Total immutable replay capacity across the process's caches.
+        replay_capacity: u64,
+        /// Longest configured replay retention interval.
+        replay_expiry_ms: u64,
+        /// Longest existing connection recovery deadline.
+        retirement_deadline_ms: u64,
+        /// Current immutable generation.
+        generation: u64,
+        /// All live admitted connections, including bounded pre-auth idle sockets.
+        admitted_connections: u64,
+        /// Occupied REALITY, Handoff and NXR replay entries after expiry maintenance.
+        replay_entries: u64,
+        /// Held process descriptor permits, including pre-creation reservations.
+        fd_units_in_use: u64,
+        /// Idle retained pipe pairs, when supported by this platform.
+        retained_pipe_pairs: Option<u64>,
+        /// Queued bytes in idle pipes; absent when inspection failed.
+        retained_pipe_bytes: Option<u64>,
+        /// Warm sockets held by the process-lifetime authority.
+        warm_ready: u64,
+        /// Speculative connections held by that authority.
+        warm_connecting: u64,
+    },
     /// Process startup began.
     ServerStarting,
     /// A complete validated configuration was published.
@@ -166,6 +223,14 @@ pub enum LogEvent {
         pool_cold_fallback: u64,
         /// Speculative cover connection failures.
         pool_connect_failure: u64,
+        /// Dial failures classified without endpoint or error-message labels.
+        pool_connect_timeout: u64,
+        pool_connect_resource: u64,
+        pool_connect_policy: u64,
+        pool_connect_io: u64,
+        /// Current speculative-dial failure streak and remaining backoff.
+        pool_failure_streak: u32,
+        pool_backoff_remaining_ms: u64,
         /// Idle sockets discarded as closed or expired.
         pool_stale_discard: u64,
         /// Speculative dials submitted by the controller.
@@ -196,6 +261,14 @@ pub enum LogEvent {
         pool_checkout_miss: u64,
         pool_cold_fallback: u64,
         pool_connect_failure: u64,
+        /// Dial failures classified without endpoint or error-message labels.
+        pool_connect_timeout: u64,
+        pool_connect_resource: u64,
+        pool_connect_policy: u64,
+        pool_connect_io: u64,
+        /// Current speculative-dial failure streak and remaining backoff.
+        pool_failure_streak: u32,
+        pool_backoff_remaining_ms: u64,
         pool_stale_discard: u64,
         pool_refill: u64,
         pool_target_ready: u32,
@@ -243,6 +316,9 @@ pub enum LogEvent {
         peer: SocketAddr,
         /// Fixed safe category.
         reason: RejectionReason,
+        /// Optional closed-vocabulary stage and cause; never raw error text.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        failure: Option<FailureDetail>,
     },
     /// A bounded resource rejected additional work.
     AdmissionLimited {
@@ -508,7 +584,10 @@ impl LogEvent {
             | Self::CoverPoolSummary { .. }
             | Self::TransportPoolSummary { .. }
             | Self::CoverProfileSummary { .. } => LogLevel::Info,
-            Self::ConnectionAccepted { .. }
+            Self::ResourceOwnership { .. }
+            | Self::GenerationRetired { .. }
+            | Self::ConnectionTaskOwnership { .. }
+            | Self::ConnectionAccepted { .. }
             | Self::ConnectionClosed { .. }
             | Self::CoverFlightSelected { .. }
             | Self::ConnectionCompleted { .. } => LogLevel::Debug,

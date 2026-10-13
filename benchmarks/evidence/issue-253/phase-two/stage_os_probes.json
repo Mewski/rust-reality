@@ -1,0 +1,78 @@
+[
+  {
+    "stage": "S2_line_tcp_connect",
+    "scenario": "landing_not_listening",
+    "verdict": "PASS",
+    "expected": "ECONNREFUSED",
+    "errno": 111,
+    "code": "ECONNREFUSED",
+    "exc": "ConnectionRefusedError",
+    "msg_safe": "ConnectionRefusedError"
+  },
+  {
+    "stage": "S2_vs_S9",
+    "scenario": "landing_stop_listen_established_survives",
+    "verdict": "PASS",
+    "established": {
+      "send": "OK"
+    },
+    "new_connect": {
+      "errno": 111,
+      "code": "ECONNREFUSED",
+      "exc": "ConnectionRefusedError",
+      "msg_safe": "ConnectionRefusedError"
+    },
+    "matches_issue_253_symptom": true,
+    "note": "new ECONNREFUSED while established send may still OK \u2014 classic intermittent pattern"
+  },
+  {
+    "stage": "S4_warm_checkout_stale",
+    "scenario": "peer_fin",
+    "verdict": "PASS",
+    "recv": "b''",
+    "idle_healthy_would_be": false,
+    "pool_path": "stale_discard then cold_fallback"
+  },
+  {
+    "stage": "S4_warm_first_use",
+    "scenario": "peer_rst",
+    "verdict": "PASS",
+    "recv_probe": {
+      "errno": 104,
+      "code": "ECONNRESET",
+      "exc": "ConnectionResetError",
+      "msg_safe": "ConnectionResetError"
+    },
+    "first_write": {
+      "errno": 32,
+      "code": "EPIPE",
+      "exc": "BrokenPipeError",
+      "msg_safe": "BrokenPipeError"
+    },
+    "typed_causes": "FailureCause::ConnectionReset / Io(EPIPE)"
+  },
+  {
+    "stage": "S4_warm_checkout_stale",
+    "scenario": "silent_blackhole_undetectable_by_try_read",
+    "verdict": "PASS",
+    "idle_probe": "WouldBlock",
+    "idle_healthy_would_be": true,
+    "gap": "GAP: AdaptiveTcpPool.idle_healthy cannot see silent drops without RST/FIN"
+  },
+  {
+    "stage": "S3_landing_accept_backlog",
+    "scenario": "accept_queue_pressure",
+    "verdict": "PASS",
+    "fillers": 64,
+    "extra_connect": {
+      "errno": null,
+      "code": null,
+      "exc": "TimeoutError",
+      "msg_safe": "TimeoutError"
+    },
+    "tcp_abort_on_overflow": "0",
+    "note": "On this kernel with tcp_abort_on_overflow=0, overflow tends toward client timeout / SYN drop, NOT ECONNREFUSED. Do not equate backlog pressure with connection_refused without host sysctl evidence.",
+    "refused": false,
+    "timed_out_or_other": true
+  }
+]
