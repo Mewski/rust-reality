@@ -97,6 +97,8 @@ fn main() -> ExitCode {
 
 fn serve(config_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let hz = observe_hz();
+    // Evidence marker only — never a product log. Slot server.log proves Idle vs Observed.
+    eprintln!( "rr-evidence-observe-server: observe_hz={hz}");
     let config = load(&config_path)?;
     let machine = MachineReport::detect();
     let resource_mode =
