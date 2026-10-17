@@ -1,0 +1,10 @@
+test	verdict
+server::warm_pool::tests::listen_unavailable_established_survives_new_dials_refuse	ok
+server::warm_pool::tests::peer_teardown_terminates_established_and_new_dials_refuse	ok
+server::warm_pool::tests::checkout_discards_a_peer_closed_idle_socket_and_recovers	ok
+server::outbound::tests::stale_warm_nxr_socket_is_discarded_before_cold_fallback	ok
+server::handoff::tests::stale_warm_handoff_socket_is_discarded_before_cold_fallback	ok
+server::production::failure::tests::landing_errno_and_line_rejection_have_distinct_stages	ok
+server::pre_auth::tests::idle_admission_limit_rejects_excess_without_a_wait_queue	ok
+server::warm_pool::tests::pressure_reclaims_ready_state_before_checked_out_sessions	ok
+server::production::failure::tests::landing_pre_auth_and_authenticate_are_not_lumped_as_outbound	ok

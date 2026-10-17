@@ -1,0 +1,11 @@
+{
+  "collector": "benchmark-setup-rate",
+  "evidence": {
+    "path": "/workspace/evidence-v203-aa/aa-setup-rate-d6a9ea0/environment.json",
+    "sha256": "ae14b277e7368c4e7094bc858219da62cdd0e53473311459ad2bcd66bac8ccd1"
+  },
+  "exitCode": 0,
+  "runId": "benchmark-setup-rate-1791857154-1060664",
+  "schemaVersion": 1,
+  "status": "COMPLETE"
+}

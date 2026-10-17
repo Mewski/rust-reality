@@ -1,0 +1,8 @@
+{
+  "sourceCommit": "d6a9ea0b0b646f426a89b83ecb7537a13f8fea1c",
+  "binarySha256": "4377b7ffa58155c8c478c4b441ddfe57283356dfe08a38637a6deed86c572aee",
+  "sha256sumsVerified": true,
+  "gnuBuildId": "b9915a72137b469ce0096ef20d3319d0422364b2",
+  "harness": "rr-evidence-observe-server",
+  "note": "Evidence harness linking src/ identical to d6a9ea0; observe.hz selects Idle vs Observed"
+}

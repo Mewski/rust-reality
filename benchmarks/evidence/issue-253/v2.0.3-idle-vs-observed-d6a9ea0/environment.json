@@ -1,0 +1,63 @@
+{
+  "baseline": {
+    "buildId": "b9915a72137b469ce0096ef20d3319d0422364b2",
+    "path": "/workspace/evidence-v203-observe/idle/rr-evidence-observe-server",
+    "sha256": "4377b7ffa58155c8c478c4b441ddfe57283356dfe08a38637a6deed86c572aee"
+  },
+  "blocks": 12,
+  "candidate": {
+    "buildId": "b9915a72137b469ce0096ef20d3319d0422364b2",
+    "path": "/workspace/evidence-v203-observe/observed/rr-evidence-observe-server",
+    "sha256": "4377b7ffa58155c8c478c4b441ddfe57283356dfe08a38637a6deed86c572aee"
+  },
+  "concurrencies": "1 8 32",
+  "connectionsPerSample": 96,
+  "coverModes": {
+    "baseline": "default",
+    "candidate": "default"
+  },
+  "coverNetwork": {
+    "model": "loopback",
+    "netemRttMs": null,
+    "target": "127.0.0.1:61001"
+  },
+  "harness": {
+    "benchOrigin": {
+      "embedded": true,
+      "path": "/workspace/rust-reality-v203-aa/tools/target/debug/rr-dev",
+      "sha256": "688fd44d3577b2f7fead987bf150f1766929f1b121aa5040fe4c731b006e8c6a"
+    },
+    "contract": null,
+    "entrypoint": {
+      "path": "/workspace/rust-reality-v203-aa/tools/target/debug/rr-dev",
+      "sha256": "688fd44d3577b2f7fead987bf150f1766929f1b121aa5040fe4c731b006e8c6a"
+    },
+    "keeperHelper": null
+  },
+  "hostExclusiveLock": {
+    "deviceInode": "40:223789",
+    "mode": "lockDirectory",
+    "path": "/tmp/rust-reality-box/host-exclusive.lock.d",
+    "protocolVersion": 1,
+    "required": true
+  },
+  "measureMode": "schedstat",
+  "method": "balanced block ABBA",
+  "ports": {
+    "address": "127.0.0.1",
+    "base": 61000,
+    "count": 98
+  },
+  "repository": {
+    "dirty": false,
+    "head": "73daaed7e9aa4291cfc96368ca9aed3aaca96ed2"
+  },
+  "runId": "benchmark-setup-rate-1791859062-1221732",
+  "samplesPerSlot": 9,
+  "schemaVersion": 2,
+  "xray": {
+    "buildId": "c4ae6798c38e0e5343b192406746333cd0ba7ff3",
+    "path": "/workspace/evidence-v203-observe/xray/xray-with-buildid",
+    "sha256": "19b36f91263342a6fcd47df567b23f0629a01fb154e71a84e78a966abba16168"
+  }
+}

@@ -1,0 +1,315 @@
+{
+  "cells": {
+    "1": {
+      "blockCount": 12,
+      "blockRatioSpread": {
+        "max": 1.0544980468532457,
+        "min": 0.9359106581021993,
+        "standardDeviation": 0.040614221916561735
+      },
+      "blocks": [
+        {
+          "baseline": 615.6583821262122,
+          "candidate": 631.3111105212622,
+          "candidateVsBaseline": 1.0254243730768229
+        },
+        {
+          "baseline": 644.8223083910448,
+          "candidate": 646.7093717210073,
+          "candidateVsBaseline": 1.0029264858014468
+        },
+        {
+          "baseline": 637.4552167804989,
+          "candidate": 627.0790852259076,
+          "candidateVsBaseline": 0.9837225717486533
+        },
+        {
+          "baseline": 629.4936240689449,
+          "candidate": 656.2339655866057,
+          "candidateVsBaseline": 1.0424791300423595
+        },
+        {
+          "baseline": 655.8361507149971,
+          "candidate": 627.9342965203607,
+          "candidateVsBaseline": 0.9574560594681804
+        },
+        {
+          "baseline": 617.3566710693335,
+          "candidate": 651.0014038544339,
+          "candidateVsBaseline": 1.0544980468532457
+        },
+        {
+          "baseline": 649.7549635207972,
+          "candidate": 621.8616825296751,
+          "candidateVsBaseline": 0.9570710767025494
+        },
+        {
+          "baseline": 639.7333218135675,
+          "candidate": 654.4133382001694,
+          "candidateVsBaseline": 1.0229470873034812
+        },
+        {
+          "baseline": 632.6513048985671,
+          "candidate": 592.1050991168331,
+          "candidateVsBaseline": 0.9359106581021993
+        },
+        {
+          "baseline": 632.4872370222786,
+          "candidate": 619.9168933363213,
+          "candidateVsBaseline": 0.9801255377971928
+        },
+        {
+          "baseline": 659.3886270663195,
+          "candidate": 633.5954325700427,
+          "candidateVsBaseline": 0.9608831674713089
+        },
+        {
+          "baseline": 641.8167735969822,
+          "candidate": 672.6378240513411,
+          "candidateVsBaseline": 1.0480215720783148
+        }
+      ],
+      "bootstrap95": [
+        0.9591696134697446,
+        1.033951751559591
+      ],
+      "medianCandidateVsBaseline": 0.9933245287750501
+    },
+    "32": {
+      "blockCount": 12,
+      "blockRatioSpread": {
+        "max": 1.0849852892994587,
+        "min": 0.8963295355564862,
+        "standardDeviation": 0.06870023767703777
+      },
+      "blocks": [
+        {
+          "baseline": 3876.2811297708076,
+          "candidate": 3732.7141965277806,
+          "candidateVsBaseline": 0.9629627138907968
+        },
+        {
+          "baseline": 3668.5778715557567,
+          "candidate": 3953.3068720816614,
+          "candidateVsBaseline": 1.0776129090058426
+        },
+        {
+          "baseline": 3770.1790601885364,
+          "candidate": 3537.5840182662578,
+          "candidateVsBaseline": 0.9383066326004561
+        },
+        {
+          "baseline": 3889.534806685076,
+          "candidate": 3858.3405263605737,
+          "candidateVsBaseline": 0.9919799457069036
+        },
+        {
+          "baseline": 3604.273840568168,
+          "candidate": 3785.9788816889823,
+          "candidateVsBaseline": 1.0504137724152975
+        },
+        {
+          "baseline": 3507.086150690955,
+          "candidate": 3799.666912192298,
+          "candidateVsBaseline": 1.0834255986108865
+        },
+        {
+          "baseline": 3670.4020475070356,
+          "candidate": 3974.184707039164,
+          "candidateVsBaseline": 1.0827654996919098
+        },
+        {
+          "baseline": 3732.4488566219134,
+          "candidate": 4020.029749925391,
+          "candidateVsBaseline": 1.0770488503260445
+        },
+        {
+          "baseline": 3918.7009550957637,
+          "candidate": 3685.778616288426,
+          "candidateVsBaseline": 0.9405613386996391
+        },
+        {
+          "baseline": 4161.365701209434,
+          "candidate": 3729.9549862457434,
+          "candidateVsBaseline": 0.8963295355564862
+        },
+        {
+          "baseline": 3460.3136052649816,
+          "candidate": 3754.3893580752792,
+          "candidateVsBaseline": 1.0849852892994587
+        },
+        {
+          "baseline": 4088.17701354587,
+          "candidate": 4175.738988998544,
+          "candidateVsBaseline": 1.0214183424941103
+        }
+      ],
+      "bootstrap95": [
+        0.951762026295218,
+        1.0801892043488763
+      ],
+      "medianCandidateVsBaseline": 1.035916057454704
+    },
+    "8": {
+      "blockCount": 12,
+      "blockRatioSpread": {
+        "max": 1.1689513752550924,
+        "min": 0.9153531129882929,
+        "standardDeviation": 0.07437609092846265
+      },
+      "blocks": [
+        {
+          "baseline": 2752.8607109187124,
+          "candidate": 3048.1605836745794,
+          "candidateVsBaseline": 1.1072701831896596
+        },
+        {
+          "baseline": 2984.777579769153,
+          "candidate": 3073.663603871557,
+          "candidateVsBaseline": 1.0297797814835097
+        },
+        {
+          "baseline": 3036.6514636113016,
+          "candidate": 2779.6083702770607,
+          "candidateVsBaseline": 0.9153531129882929
+        },
+        {
+          "baseline": 3069.6903225845513,
+          "candidate": 3021.3429201857734,
+          "candidateVsBaseline": 0.9842500717277334
+        },
+        {
+          "baseline": 2926.908764011856,
+          "candidate": 2839.0537018823006,
+          "candidateVsBaseline": 0.9699836690470891
+        },
+        {
+          "baseline": 2554.0227059700164,
+          "candidate": 2985.528354576383,
+          "candidateVsBaseline": 1.1689513752550924
+        },
+        {
+          "baseline": 3017.4159251385545,
+          "candidate": 2893.205596028116,
+          "candidateVsBaseline": 0.9588355294092461
+        },
+        {
+          "baseline": 3007.547734993279,
+          "candidate": 2992.298863007233,
+          "candidateVsBaseline": 0.9949297988495336
+        },
+        {
+          "baseline": 2850.0903325589256,
+          "candidate": 3100.228916680321,
+          "candidateVsBaseline": 1.087765142481225
+        },
+        {
+          "baseline": 3168.225040440799,
+          "candidate": 3014.6909654365736,
+          "candidateVsBaseline": 0.9515394035952496
+        },
+        {
+          "baseline": 3004.5372403185515,
+          "candidate": 2892.5506838755455,
+          "candidateVsBaseline": 0.962727519253137
+        },
+        {
+          "baseline": 2989.0736916364594,
+          "candidate": 3032.474756028605,
+          "candidateVsBaseline": 1.0145199044485198
+        }
+      ],
+      "bootstrap95": [
+        0.9607815243311916,
+        1.0587724619823673
+      ],
+      "medianCandidateVsBaseline": 0.9895899352886335
+    }
+  },
+  "coverPool": null,
+  "coverProfile": null,
+  "failures": 0,
+  "method": "alternating balanced ABBA blocks; block bootstrap",
+  "performanceVerdict": "NOT_EVALUATED",
+  "rawSampleCount": 1296,
+  "runKind": "control",
+  "schemaVersion": 3,
+  "serverCpuPerConnection": {
+    "blockCount": 12,
+    "blockRatioSpread": {
+      "max": 1.0584627904058288,
+      "min": 0.9311068736314438,
+      "standardDeviation": 0.037712923592891516
+    },
+    "blocks": [
+      {
+        "baseline": 383.9836853780864,
+        "candidate": 362.0575268132716,
+        "candidateVsBaseline": 0.9428982027108119
+      },
+      {
+        "baseline": 361.25332947530865,
+        "candidate": 353.7620484182098,
+        "candidateVsBaseline": 0.9792630809299964
+      },
+      {
+        "baseline": 368.18325135030864,
+        "candidate": 389.7082716049383,
+        "candidateVsBaseline": 1.0584627904058288
+      },
+      {
+        "baseline": 360.5529334490741,
+        "candidate": 360.18680613425926,
+        "candidateVsBaseline": 0.9989845393537298
+      },
+      {
+        "baseline": 368.7619818672839,
+        "candidate": 373.90888734567903,
+        "candidateVsBaseline": 1.0139572562560082
+      },
+      {
+        "baseline": 382.4750983796296,
+        "candidate": 356.12519309413585,
+        "candidateVsBaseline": 0.9311068736314438
+      },
+      {
+        "baseline": 366.9692934027778,
+        "candidate": 365.63121238425924,
+        "candidateVsBaseline": 0.9963536975911227
+      },
+      {
+        "baseline": 364.48175636574075,
+        "candidate": 357.86585821759263,
+        "candidateVsBaseline": 0.9818484792925839
+      },
+      {
+        "baseline": 369.40893692129634,
+        "candidate": 371.0016678240741,
+        "candidateVsBaseline": 1.0043115657029085
+      },
+      {
+        "baseline": 350.08582118055557,
+        "candidate": 367.3388898533951,
+        "candidateVsBaseline": 1.0492823977122492
+      },
+      {
+        "baseline": 367.51199479166667,
+        "candidate": 366.8030478395061,
+        "candidateVsBaseline": 0.9980709556090477
+      },
+      {
+        "baseline": 358.6465256558642,
+        "candidate": 345.3880387731482,
+        "candidateVsBaseline": 0.9630318825521315
+      }
+    ],
+    "bootstrap95": [
+      0.9711474817410639,
+      1.0091344109794584
+    ],
+    "medianCandidateVsBaseline": 0.9972123266000852,
+    "unit": "microsecondsPerConnection"
+  },
+  "slotCount": 48,
+  "status": "COMPLETE"
+}

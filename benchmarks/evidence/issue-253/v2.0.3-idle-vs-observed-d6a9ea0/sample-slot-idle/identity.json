@@ -1,0 +1,17 @@
+{
+  "binary": {
+    "buildId": "b9915a72137b469ce0096ef20d3319d0422364b2",
+    "path": "/workspace/evidence-v203-observe/idle/rr-evidence-observe-server",
+    "sha256": "4377b7ffa58155c8c478c4b441ddfe57283356dfe08a38637a6deed86c572aee"
+  },
+  "block": 1,
+  "implementation": "baseline",
+  "ports": {
+    "server": 61002,
+    "socks": 61003
+  },
+  "position": 1,
+  "process": {
+    "serverPid": 1221849
+  }
+}

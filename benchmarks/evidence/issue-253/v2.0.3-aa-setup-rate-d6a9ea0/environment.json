@@ -1,0 +1,63 @@
+{
+  "baseline": {
+    "buildId": "6302ae650e09071c8fc26d5720c324c39ec0e8e7",
+    "path": "/workspace/evidence-v203-aa/freeze-d6a9ea0/binary/rust-reality",
+    "sha256": "257d71fd9318090885a720f718306ac24e97a9079226088542cd79bf651d63e8"
+  },
+  "blocks": 12,
+  "candidate": {
+    "buildId": "6302ae650e09071c8fc26d5720c324c39ec0e8e7",
+    "path": "/workspace/evidence-v203-aa/freeze-d6a9ea0/binary/rust-reality",
+    "sha256": "257d71fd9318090885a720f718306ac24e97a9079226088542cd79bf651d63e8"
+  },
+  "concurrencies": "1 8 32",
+  "connectionsPerSample": 96,
+  "coverModes": {
+    "baseline": "default",
+    "candidate": "default"
+  },
+  "coverNetwork": {
+    "model": "loopback",
+    "netemRttMs": null,
+    "target": "127.0.0.1:61001"
+  },
+  "harness": {
+    "benchOrigin": {
+      "embedded": true,
+      "path": "/workspace/rust-reality-v203-aa/tools/target/debug/rr-dev",
+      "sha256": "688fd44d3577b2f7fead987bf150f1766929f1b121aa5040fe4c731b006e8c6a"
+    },
+    "contract": null,
+    "entrypoint": {
+      "path": "/workspace/rust-reality-v203-aa/tools/target/debug/rr-dev",
+      "sha256": "688fd44d3577b2f7fead987bf150f1766929f1b121aa5040fe4c731b006e8c6a"
+    },
+    "keeperHelper": null
+  },
+  "hostExclusiveLock": {
+    "deviceInode": "40:212172",
+    "mode": "lockDirectory",
+    "path": "/tmp/rust-reality-box/host-exclusive.lock.d",
+    "protocolVersion": 1,
+    "required": true
+  },
+  "measureMode": "schedstat",
+  "method": "balanced block ABBA",
+  "ports": {
+    "address": "127.0.0.1",
+    "base": 61000,
+    "count": 98
+  },
+  "repository": {
+    "dirty": false,
+    "head": "d6a9ea0b0b646f426a89b83ecb7537a13f8fea1c"
+  },
+  "runId": "benchmark-setup-rate-1791857154-1060664",
+  "samplesPerSlot": 9,
+  "schemaVersion": 2,
+  "xray": {
+    "buildId": "c4ae6798c38e0e5343b192406746333cd0ba7ff3",
+    "path": "/workspace/evidence-v203-aa/xray-v26.9.9/xray-with-buildid",
+    "sha256": "19b36f91263342a6fcd47df567b23f0629a01fb154e71a84e78a966abba16168"
+  }
+}
