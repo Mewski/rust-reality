@@ -4,6 +4,38 @@ All notable user-facing changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [2.0.4] - 2026-10-18
+
+Maintenance release: pin the workspace to **Rust 1.99.1** and align
+`rust-version`. Protocol behavior, supported deploy configurations, NXR, and
+Handoff continuation-state v2 are unchanged. This release makes **no measured
+performance improvement claim**.
+
+### Changed
+
+- Pin `rust-toolchain.toml` to Rust **1.99.1** and raise workspace
+  `rust-version` to **1.99** (merged via [#293](https://github.com/jacek4yang/rust-reality/pull/293)).
+- Clippy and compatibility adjustments required by the 1.99.1 toolchain
+  migration; no intentional transport, allocator, crypto-provider, Tokio, or
+  warm-pool retuning.
+
+### Known open (not fixed by this release)
+
+- **#253:** Intermittent LINE→LANDING `ECONNREFUSED` field RCA remains
+  unresolved. Laboratory discriminators from v2.0.3 still apply; no hot-path
+  retune ships here.
+- **#254:** Unified VLESS+REALITY client remains future feature work.
+- **#291:** Historical rollback timer verification is production operations
+  and out of scope for this publication.
+
+### Performance note
+
+Same-source compiler A/B (1.96.0 vs 1.99.1 on identical v2.0.3 source) did
+**not** establish a proven setup CPS win. Weak schedstat CPU and small binary
+size deltas are within noise / not marketing claims. Open-source hotspot
+analysis after the pin still points at required X25519 and kernel I/O; no
+production source-level optimization was accepted for this tag.
+
 ## [2.0.3] - 2026-10-17
 
 TLS 1.3 KeyUpdate, Handoff continuation-state v2, and diagnostic observability
