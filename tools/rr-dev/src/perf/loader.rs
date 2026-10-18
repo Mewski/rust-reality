@@ -765,7 +765,7 @@ pub fn cpu_metric(
 }
 
 /// Reproduces `math.isclose(a, b, rel_tol=tol)` with a zero absolute tolerance.
-#[expect(
+#[allow(
     clippy::float_cmp,
     reason = "the exact-equality fast path mirrors Python's math.isclose, which \
               returns True immediately when the two values are identical"
@@ -1977,7 +1977,7 @@ pub fn validate_block_count(blocks: i64, context: &str) -> Result<(), LoadError>
 }
 
 #[cfg(test)]
-#[expect(
+#[allow(
     clippy::float_cmp,
     reason = "parity tests compare against recorded evidence exactly; an epsilon \
               would defeat their purpose"

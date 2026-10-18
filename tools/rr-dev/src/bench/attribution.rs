@@ -262,7 +262,7 @@ pub fn stat_command(
 }
 
 #[cfg(test)]
-#[expect(
+#[allow(
     clippy::float_cmp,
     reason = "these are golden-parity tests: the values are exact decimal literals \
               from the scripts' own SELF_TEST capture, so an epsilon would defeat them"

@@ -275,7 +275,7 @@ mod tests {
         std::fs::write(&path, "one\ntwo\n").unwrap();
         let mut tracker = LineTracker::new(&path);
         assert_eq!(tracker.new_lines(), ["one", "two"]);
-        assert!(tracker.new_lines().is_empty());
+        assert_eq!(tracker.new_lines(), Vec::<String>::new());
 
         let mut file = std::fs::OpenOptions::new()
             .append(true)
@@ -303,7 +303,7 @@ mod tests {
     #[test]
     fn a_missing_file_yields_nothing_rather_than_failing() {
         let mut tracker = LineTracker::new(scratch("absent"));
-        assert!(tracker.new_lines().is_empty());
+        assert_eq!(tracker.new_lines(), Vec::<String>::new());
     }
 
     /// A growing error counter means the origin failed requests during the cell,

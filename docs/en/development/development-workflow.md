@@ -9,6 +9,13 @@ that also bind agents see [AGENTS.md](../../../AGENTS.md).
 ## Toolchain
 
 Use the toolchain pinned by [`rust-toolchain.toml`](../../../rust-toolchain.toml).
+That file selects the **exact supported stable compiler** for every local build,
+CI job, and release package. The workspace `rust-version` fields (root,
+`crates/rr-*`, and `tools/`) are kept aligned with the pin's major.minor; they
+are not a deliberately lower MSRV floor. This repository supports the pinned
+stable toolchain only — do not treat an older compiler as supported merely
+because Cargo would accept a lower `rust-version`.
+
 The canonical developer interface is `cargo dev` (the `rr-dev` binary in the
 independent `tools/` workspace, exposed through a root cargo alias that runs
 `cargo run --locked` against `tools/Cargo.toml`; see

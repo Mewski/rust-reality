@@ -129,10 +129,8 @@ pub fn validate(plan: &ComparatorPlan) -> Result<(), String> {
 /// still stops the processes, removes the workspace, and releases the host lock.
 pub fn run_setup_rate_xray(plan: &ComparatorPlan) -> Result<ComparatorOutcome, String> {
     validate(plan)?;
-    for program in ["openssl"] {
-        if !Tool::exists(program) {
-            return Err(format!("required program unavailable: {program}"));
-        }
+    if !Tool::exists("openssl") {
+        return Err("required program unavailable: openssl".to_owned());
     }
     if matches!(plan.attribution, Attribution::Perf(_)) && !Tool::exists("perf") {
         return Err("MEASURE_MODE=perf requires perf".to_owned());

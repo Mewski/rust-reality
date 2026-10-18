@@ -125,8 +125,12 @@ pub fn diagnose() -> Vec<Finding> {
     findings
 }
 
-/// The minimum toolchain the repository declares in `Cargo.toml`.
-const MINIMUM_RUSTC: (u32, u32) = (1, 96);
+/// Minimum rustc major.minor accepted by `cargo dev doctor`.
+///
+/// Keep aligned with `rust-toolchain.toml` and every workspace `rust-version`
+/// field. This repository pins an exact stable compiler; there is no lower
+/// supported MSRV floor beneath that pin.
+const MINIMUM_RUSTC: (u32, u32) = (1, 99);
 
 /// Diagnoses `rustc`, treating a toolchain older than the declared MSRV as
 /// incompatible rather than merely present.
@@ -411,8 +415,8 @@ mod tests {
     #[test]
     fn a_version_string_yields_its_major_and_minor() {
         assert_eq!(
-            parse_semver("rustc 1.96.0 (ac68faa20 2026-05-25)"),
-            Some((1, 96))
+            parse_semver("rustc 1.99.1 (58cf8f9c3 2026-10-13)"),
+            Some((1, 99))
         );
         assert_eq!(parse_semver("cargo-deny 0.19.4"), Some((0, 19)));
         assert_eq!(parse_semver("no version here"), None);

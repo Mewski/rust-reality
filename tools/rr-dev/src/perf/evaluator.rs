@@ -367,7 +367,7 @@ pub fn global_outcome(metrics: &[DeterministicMetric]) -> Result<GlobalOutcome, 
 }
 
 #[cfg(test)]
-#[expect(
+#[allow(
     clippy::float_cmp,
     reason = "parity tests compare against recorded evidence exactly; an epsilon \
               would defeat their purpose"
@@ -528,7 +528,7 @@ mod tests {
         apply_global_holm(&mut metrics).expect("correction succeeds");
         let outcome = global_outcome(&metrics).expect("outcome");
         assert_eq!(outcome.verdict, OverallVerdict::Pass);
-        assert!(outcome.regressions.is_empty());
+        assert_eq!(outcome.regressions, Vec::<String>::new());
         for evaluated in &metrics {
             assert!(evaluated.adjusted_p_value.is_some());
             assert!(evaluated.improvement_adjusted_p_value.is_some());

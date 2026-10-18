@@ -1106,7 +1106,7 @@ mod tests {
             .run()
             .unwrap();
         assert_eq!(fs::read(&stdout).unwrap(), b"firstsecond");
-        assert!(fs::read(&stderr).unwrap().is_empty());
+        assert_eq!(fs::read(&stderr).unwrap(), Vec::<u8>::new());
         fs::remove_dir_all(scratch).unwrap();
     }
 
@@ -1134,7 +1134,7 @@ mod tests {
             }
         ));
         assert_eq!(fs::metadata(&stdout).unwrap().len(), 1024);
-        assert!(fs::read(&stderr).unwrap().is_empty());
+        assert_eq!(fs::read(&stderr).unwrap(), Vec::<u8>::new());
         fs::remove_dir_all(scratch).unwrap();
     }
 
@@ -1160,7 +1160,7 @@ mod tests {
             }
         ));
         assert_eq!(fs::read(&stdout).unwrap(), [0xff]);
-        assert!(fs::read(&stderr).unwrap().is_empty());
+        assert_eq!(fs::read(&stderr).unwrap(), Vec::<u8>::new());
         fs::remove_dir_all(scratch).unwrap();
     }
 }

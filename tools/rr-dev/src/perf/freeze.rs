@@ -318,6 +318,6 @@ mod tests {
         let rendered = summary(&identity, Path::new("/tmp/rr-freeze"));
         assert!(rendered.contains("b2a820d41437988a885d6ecfca2f71b5689e2910"));
         assert!(rendered.contains("d0bf5f2f8a99c934a852db78d60551cba009f19d"));
-        assert!(rendered.lines().count() == 6);
+        assert_eq!(rendered.lines().count(), 6);
     }
 }

@@ -257,7 +257,7 @@ mod tests {
     #[test]
     fn every_suite_names_the_script_it_supersedes() {
         for suite in &SUITES {
-            assert!(!suite.id.is_empty());
+            assert_ne!(suite.id, "");
             assert!(suite.supersedes.contains(".sh"), "{}", suite.id);
         }
         let ids: std::collections::BTreeSet<&str> = SUITES.iter().map(|s| s.id).collect();

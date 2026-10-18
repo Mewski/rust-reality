@@ -141,10 +141,8 @@ pub fn run(suite: &InteropSuite) -> Result<InteropReport, String> {
     };
 
     validate(suite)?;
-    for program in ["curl"] {
-        if !Tool::exists(program) {
-            return Err(format!("required program unavailable: {program}"));
-        }
+    if !Tool::exists("curl") {
+        return Err("required program unavailable: curl".to_owned());
     }
     let rust = identity::register("rust-reality", &suite.rust_bin, "", Kind::Rust)?;
     let xray = identity::register("xray", &suite.xray_bin, "", Kind::Xray)?;

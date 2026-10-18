@@ -9,6 +9,12 @@
 ## 工具链
 
 使用 [`rust-toolchain.toml`](../../../rust-toolchain.toml) 固定的工具链。
+该文件选定本仓库**唯一支持的精确稳定版编译器**，适用于本地构建、CI 与发
+布包。各工作区 `rust-version`（根、`crates/rr-*`、`tools/`）与该 pin 的
+major.minor 保持对齐，**不是**刻意更低的 MSRV 下限。本仓库只支持当前固定
+的稳定工具链——不能因为 Cargo 能接受更低的 `rust-version`，就把更旧的编译
+器当作受支持。
+
 规范的开发者入口是 `cargo dev`（独立 `tools/` 工作区中的 `rr-dev` 二进制，
 通过根目录 Cargo alias 暴露；alias 对 `tools/Cargo.toml` 使用
 `cargo run --locked`，见 [ADR 0056](../../adr/0056-cargo-dev-alias-uses-locked.md)）：

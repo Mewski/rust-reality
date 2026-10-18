@@ -467,10 +467,8 @@ pub fn run(suite: &RoutingSuite) -> Result<crate::bench::paired::SuiteOutcome, S
     };
 
     validate(suite)?;
-    for program in ["openssl"] {
-        if !crate::process::Tool::exists(program) {
-            return Err(format!("required program unavailable: {program}"));
-        }
+    if !crate::process::Tool::exists("openssl") {
+        return Err("required program unavailable: openssl".to_owned());
     }
     let rust = identity::register("rust-reality", &suite.rust_bin, "", Kind::Rust)?;
     let xray = identity::register("xray", &suite.xray_bin, "", Kind::Xray)?;

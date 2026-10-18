@@ -245,8 +245,11 @@ impl ClientHello {
         }
         let cipher_bytes = reader.read_bytes(cipher_bytes_len)?;
         let cipher_suites = cipher_bytes
-            .chunks_exact(2)
-            .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .copied()
+            .map(u16::from_be_bytes)
             .collect();
 
         let compression_len = usize::from(reader.read_u8()?);
@@ -1006,8 +1009,11 @@ fn classify_profile_message(
         reader
             .read_bytes(cipher_bytes_len)
             .map_err(|_| ClientHelloClassError::Malformed)?
-            .chunks_exact(2)
-            .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]])),
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .copied()
+            .map(u16::from_be_bytes),
         &mut digest,
     )?;
 
@@ -1141,8 +1147,11 @@ fn normalized_extension_digest(
                 reader
                     .read_bytes(vector_len)
                     .map_err(|_| ClientHelloClassError::Malformed)?
-                    .chunks_exact(2)
-                    .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]])),
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .copied()
+                    .map(u16::from_be_bytes),
                 &mut digest,
             )?;
         }
@@ -1160,8 +1169,11 @@ fn normalized_extension_digest(
                 reader
                     .read_bytes(vector_len)
                     .map_err(|_| ClientHelloClassError::Malformed)?
-                    .chunks_exact(2)
-                    .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]])),
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .copied()
+                    .map(u16::from_be_bytes),
                 &mut digest,
             )?;
         }
@@ -1179,8 +1191,11 @@ fn normalized_extension_digest(
                 reader
                     .read_bytes(vector_len)
                     .map_err(|_| ClientHelloClassError::Malformed)?
-                    .chunks_exact(2)
-                    .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]])),
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .copied()
+                    .map(u16::from_be_bytes),
                 &mut digest,
             )?;
         }

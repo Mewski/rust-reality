@@ -1788,13 +1788,13 @@ fn collector_inherited_pipes_are_fixed_not_dynamic_permits() {
         "{without:?}"
     );
     let startup = super::observation::startup_policy(&raw, 1).unwrap();
-    assert!(
+    assert_eq!(
         startup
             .fixed_descriptor_targets
             .iter()
             .filter(|target| target.as_str() == "pipe:[12740]" || target.as_str() == "pipe:[12741]")
-            .count()
-            == 2
+            .count(),
+        2
     );
     let sample =
         super::observation::normalize(&raw, &startup, "native", baseline.observation.clone())
@@ -1842,7 +1842,7 @@ fn injected_evictions_require_exact_peer_reason_time_and_one_use() {
             .rejections,
         0
     );
-    assert!(remaining.is_empty());
+    assert_eq!(remaining, Vec::<(String, u64, u64)>::new());
     assert_eq!(
         product_log_with_faults(&encode(&event), &mut remaining, &mut None)
             .unwrap()

@@ -187,7 +187,7 @@ fn is_lower_hex(text: &str, length: usize) -> bool {
 }
 
 #[cfg(test)]
-#[expect(
+#[allow(
     clippy::float_cmp,
     reason = "admissibility and pairing are exact: a value either is the recorded \
               measurement or it is different evidence, so an epsilon would hide the bug"
