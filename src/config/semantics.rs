@@ -232,6 +232,7 @@ fn validate_client(client: &ClientConfig) -> Result<(), SemanticError> {
 
 fn validate_entry(entry: &EntryConfig) -> Result<(), SemanticError> {
     validate_listeners(&entry.listeners)?;
+    reject_client_only_protocol(&entry.listeners)?;
     validate_reality(entry)?;
     let outbounds = validate_outbounds(entry.outbounds.as_ref())?;
     validate_users(entry)?;
@@ -446,6 +447,7 @@ fn validate_assets(entry: &EntryConfig) -> Result<(), SemanticError> {
 
 fn validate_landing(landing: &LandingConfig) -> Result<(), SemanticError> {
     validate_listeners(&landing.listeners)?;
+    reject_client_only_protocol(&landing.listeners)?;
     let outbounds = validate_outbounds(landing.outbounds.as_ref())?;
     validate_landing_protocol(&landing.landing)?;
     validate_egress(landing, &outbounds)?;
@@ -552,6 +554,18 @@ fn validate_egress(
 }
 
 // ------------------------------------------------------------ shared sections
+
+fn reject_client_only_protocol(listeners: &[ListenerConfig]) -> Result<(), SemanticError> {
+    for (index, listener) in listeners.iter().enumerate() {
+        if listener.protocol.is_some() {
+            return fail(
+                format!("listeners[{index}].protocol"),
+                "protocol is only valid on client listeners (socks5 or http)",
+            );
+        }
+    }
+    Ok(())
+}
 
 fn validate_listeners(listeners: &[ListenerConfig]) -> Result<(), SemanticError> {
     if listeners.is_empty() {
