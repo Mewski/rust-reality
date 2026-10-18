@@ -97,8 +97,6 @@ impl fmt::Display for CertificateError {
 
 impl std::error::Error for CertificateError {}
 
-
-
 /// Bounded cursor over one handshake message body.
 struct Reader<'a> {
     data: &'a [u8],
@@ -339,7 +337,6 @@ pub(crate) fn verify_certificate_signature(
         .verify_strict(&signed, &Signature::from_bytes(&raw))
         .map_err(|_| CertificateError::Signature)
 }
-
 
 /// Checks the server's `Finished` against our own computation.
 ///

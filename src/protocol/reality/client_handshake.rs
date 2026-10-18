@@ -263,16 +263,15 @@ where
 
     let mut response = Vec::new();
     response
-        .try_reserve_exact(change_cipher_spec_record().len() + RECORD_HEADER_LEN + finished.len() + 64)
+        .try_reserve_exact(
+            change_cipher_spec_record().len() + RECORD_HEADER_LEN + finished.len() + 64,
+        )
         .map_err(|_| ClientHandshakeError::BufferAllocation)?;
     response.extend_from_slice(&change_cipher_spec_record());
     let mut sealed = Vec::new();
     client_records.seal_into(ContentType::Handshake, &finished, 0, &mut sealed)?;
     response.extend_from_slice(&sealed);
-    stream
-        .write_all(&response)
-        .await
-        .map_err(socket_failure)?;
+    stream.write_all(&response).await.map_err(socket_failure)?;
     stream.flush().await.map_err(socket_failure)?;
 
     let application = schedule
@@ -329,10 +328,8 @@ pub async fn establish_with_server_flight(
                 .read_exact(&mut buffer[offset..offset + RECORD_HEADER_LEN])
                 .await
                 .map_err(socket_failure)?;
-            let body_len = usize::from(u16::from_be_bytes([
-                buffer[offset + 3],
-                buffer[offset + 4],
-            ]));
+            let body_len =
+                usize::from(u16::from_be_bytes([buffer[offset + 3], buffer[offset + 4]]));
             let record_end = offset
                 .checked_add(RECORD_HEADER_LEN)
                 .and_then(|start| start.checked_add(body_len))
@@ -355,14 +352,14 @@ pub async fn establish_with_server_flight(
                 ));
             }
             let mut record = buffer[offset..record_end].to_vec();
-            let established = flight.verify_client_finished(&mut record).map_err(|error| {
-                match error {
+            let established = flight
+                .verify_client_finished(&mut record)
+                .map_err(|error| match error {
                     RealityHandshakeError::ClientFinished => {
                         ClientHandshakeError::Protocol("client finished")
                     }
                     _ => ClientHandshakeError::Protocol("client finished"),
-                }
-            })?;
+                })?;
             return Ok(established);
         }
     };
@@ -430,7 +427,9 @@ where
                 flight.push(opened.plaintext())?;
             }
             OUTER_ALERT => {
-                return Err(ClientHandshakeError::Protocol("peer sent a plaintext alert"));
+                return Err(ClientHandshakeError::Protocol(
+                    "peer sent a plaintext alert",
+                ));
             }
             _ => {
                 return Err(ClientHandshakeError::Protocol(
@@ -509,7 +508,7 @@ mod tests {
     use super::*;
     use crate::config::load_bytes;
     use crate::protocol::reality::tls13::{
-        CertificateIdentity, CoverHandshakePlan, CoverHandshakeRecordShape, ContentType,
+        CertificateIdentity, ContentType, CoverHandshakePlan, CoverHandshakeRecordShape,
         build_server_flight, build_server_flight_with_shape,
     };
     use crate::protocol::reality::{
@@ -596,9 +595,7 @@ mod tests {
         output.extend_from_slice(value);
     }
 
-    async fn handshake_pair(
-        suite_wire: u16,
-    ) -> (ClientSession, EstablishedTls, CipherSuite) {
+    async fn handshake_pair(suite_wire: u16) -> (ClientSession, EstablishedTls, CipherSuite) {
         let (authenticator, server_public) = authenticator([0x42; 32]);
         let keys = ClientKeyAgreement::generate().expect("keys");
         let now = 1_700_000_000_u32;
@@ -621,24 +618,13 @@ mod tests {
         }
         let target = ServerHelloTemplate::parse(&target_message, &client).expect("target");
         let identity = CertificateIdentity::from_seed([0x42; 32]);
-        let flight = build_server_flight(
-            &client,
-            auth.auth_key(),
-            target,
-            &identity,
-            Some(b"h2"),
-        )
-        .expect("server flight");
+        let flight = build_server_flight(&client, auth.auth_key(), target, &identity, Some(b"h2"))
+            .expect("server flight");
 
-        let (session, established) = establish_with_server_flight(
-            &record,
-            &keys,
-            &auth_key,
-            ALPN,
-            flight,
-        )
-        .await
-        .expect("handshake");
+        let (session, established) =
+            establish_with_server_flight(&record, &keys, &auth_key, ALPN, flight)
+                .await
+                .expect("handshake");
         let suite = session.negotiated().suite;
         (session, established, suite)
     }
@@ -720,8 +706,7 @@ mod tests {
         let keys = ClientKeyAgreement::generate().expect("keys");
         let now = 1_700_000_000_u32;
         let (record, auth_key) =
-            build_client_hello(NAME, ALPN, &keys, &server_public, plaintext(now))
-                .expect("hello");
+            build_client_hello(NAME, ALPN, &keys, &server_public, plaintext(now)).expect("hello");
         let client = ClientHello::parse_message(record.message()).expect("parse");
         let _ = authenticator
             .authenticate(&client, u64::from(now))
@@ -754,9 +739,7 @@ mod tests {
             build_client_hello(NAME, ALPN, &keys, &server_public, auth).expect("hello");
         let client = ClientHello::parse_message(record.message()).expect("parse");
         assert!(
-            authenticator
-                .authenticate(&client, 1_700_000_000)
-                .is_err(),
+            authenticator.authenticate(&client, 1_700_000_000).is_err(),
             "unknown shortId must not authenticate"
         );
     }
@@ -771,9 +754,7 @@ mod tests {
                 .expect("hello");
         let client = ClientHello::parse_message(record.message()).expect("parse");
         assert!(
-            authenticator
-                .authenticate(&client, 1_700_000_000)
-                .is_err(),
+            authenticator.authenticate(&client, 1_700_000_000).is_err(),
             "wrong server public key must not authenticate"
         );
     }
@@ -784,8 +765,7 @@ mod tests {
         let keys = ClientKeyAgreement::generate().expect("keys");
         let now = 1_700_000_000_u32;
         let (record, auth_key) =
-            build_client_hello(NAME, ALPN, &keys, &server_public, plaintext(now))
-                .expect("hello");
+            build_client_hello(NAME, ALPN, &keys, &server_public, plaintext(now)).expect("hello");
         let client = ClientHello::parse_message(record.message()).expect("parse");
         let auth = authenticator
             .authenticate(&client, u64::from(now))
@@ -835,8 +815,7 @@ mod tests {
         let keys = ClientKeyAgreement::generate().expect("keys");
         let now = 1_700_000_000_u32;
         let (record, auth_key) =
-            build_client_hello(NAME, ALPN, &keys, &server_public, plaintext(now))
-                .expect("hello");
+            build_client_hello(NAME, ALPN, &keys, &server_public, plaintext(now)).expect("hello");
         let client = ClientHello::parse_message(record.message()).expect("parse");
         let auth = authenticator
             .authenticate(&client, u64::from(now))
@@ -847,23 +826,14 @@ mod tests {
         )
         .expect("target");
         let identity = CertificateIdentity::from_seed([0x42; 32]);
-        let flight = build_server_flight(
-            &client,
-            auth.auth_key(),
-            target,
-            &identity,
-            Some(b"h2"),
-        )
-        .expect("flight");
+        let flight = build_server_flight(&client, auth.auth_key(), target, &identity, Some(b"h2"))
+            .expect("flight");
 
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.expect("accept");
-            socket
-                .write_all(flight.wire())
-                .await
-                .expect("write flight");
+            socket.write_all(flight.wire()).await.expect("write flight");
             let mut header = [0_u8; RECORD_HEADER_LEN];
             loop {
                 socket.read_exact(&mut header).await.expect("header");

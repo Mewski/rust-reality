@@ -33,6 +33,7 @@ pub use handshake::{
 };
 pub use handshake_read::{ClientFinishedReadError, read_client_finished};
 pub use idle::{IdleDeadline, IdleError};
+pub(crate) use keys::TranscriptHasher;
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub use keys::fuzz_transcript_snapshot_matches;
@@ -40,7 +41,6 @@ pub use keys::{
     ApplicationTrafficSecrets, CipherSuite, FinishedVerifyData, HashAlgorithm, Tls13KeySchedule,
     Tls13KeyScheduleError, TrafficKeys, TrafficSecret, TranscriptHash,
 };
-pub(crate) use keys::TranscriptHasher;
 pub use messages::{
     CertificateIdentity, HandshakeMessageError, certificate_message, encrypted_extensions,
     finished_message,
