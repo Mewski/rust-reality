@@ -426,7 +426,7 @@ pub fn summary_document(
 }
 
 #[cfg(test)]
-#[expect(
+#[allow(
     clippy::float_cmp,
     reason = "golden-parity tests: exact reproduction of recorded statistics is the \
               property under test, so an epsilon would defeat them"

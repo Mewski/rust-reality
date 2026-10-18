@@ -764,7 +764,9 @@ fn parse_client_hello_echo(wire: &[u8]) -> Result<(Vec<u8>, [u8; 2]), String> {
         return Err("ClientHello cipher-suite vector is malformed".to_owned());
     }
     let suites = body[cursor..cursor + suites_bytes]
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|suite| [suite[0], suite[1]])
         .collect::<Vec<_>>();
     let cipher = [[0x13, 1], [0x13, 2], [0x13, 3]]

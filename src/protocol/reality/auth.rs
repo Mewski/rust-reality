@@ -580,7 +580,7 @@ pub(crate) fn decode_short_id(encoded: &str) -> Result<[u8; 8], RealityAuthConfi
         return Err(RealityAuthConfigError::InvalidShortId);
     }
     let mut output = [0_u8; 8];
-    for (index, pair) in encoded.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in encoded.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let high = decode_hex(pair[0]).ok_or(RealityAuthConfigError::InvalidShortId)?;
         let low = decode_hex(pair[1]).ok_or(RealityAuthConfigError::InvalidShortId)?;
         let Some(byte) = output.get_mut(index) else {
@@ -956,7 +956,9 @@ mod tests {
     fn hex_vec(encoded: &str) -> Vec<u8> {
         encoded
             .as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 let decode = |byte| match byte {
                     b'0'..=b'9' => byte - b'0',

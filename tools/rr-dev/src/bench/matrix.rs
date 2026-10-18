@@ -1297,10 +1297,8 @@ pub fn run(suite: &MatrixSuite) -> Result<MatrixOutcome, String> {
     };
 
     validate(suite)?;
-    for program in ["curl"] {
-        if !Tool::exists(program) {
-            return Err(format!("required program unavailable: {program}"));
-        }
+    if !Tool::exists("curl") {
+        return Err("required program unavailable: curl".to_owned());
     }
 
     let mut binaries = std::collections::BTreeMap::new();

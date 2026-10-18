@@ -151,7 +151,7 @@ impl StrictCounter {
         if self
             .inner
             .used
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                 used.checked_sub(1)
             })
             .is_err()
@@ -340,7 +340,7 @@ impl Drop for WarmUsePermit {
             self.inner
                 .metrics
                 .in_use
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |in_use| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |in_use| {
                     in_use.checked_sub(1)
                 });
         debug_assert!(outcome.is_ok(), "warm checkout gauge underflowed");

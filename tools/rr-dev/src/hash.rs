@@ -125,10 +125,10 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     }
     message.extend_from_slice(&bit_len.to_be_bytes());
 
-    for chunk in message.chunks_exact(64) {
+    for chunk in message.as_chunks::<64>().0 {
         let mut w = [0_u32; 64];
-        for (index, word) in chunk.chunks_exact(4).enumerate() {
-            w[index] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
+        for (index, word) in chunk.as_chunks::<4>().0.iter().enumerate() {
+            w[index] = u32::from_be_bytes(*word);
         }
         for index in 16..64 {
             let s0 = w[index - 15].rotate_right(7)
@@ -216,10 +216,8 @@ impl Sha256 {
                 self.buffered_len = 0;
             }
         }
-        for chunk in rest.chunks_exact(64) {
-            if let Ok(block) = chunk.try_into() {
-                Self::compress(&mut self.state, block);
-            }
+        for chunk in rest.as_chunks::<64>().0 {
+            Self::compress(&mut self.state, chunk);
         }
         // Only overwrite the buffer when this call actually brought bytes; an
         // empty update must leave previously buffered data alone.
@@ -241,10 +239,8 @@ impl Sha256 {
         let bit_len = self.total_len.wrapping_mul(8).to_be_bytes();
         block[tail..tail + 8].copy_from_slice(&bit_len);
         let mut state = self.state;
-        for chunk in block[..tail + 8].chunks_exact(64) {
-            if let Ok(block) = chunk.try_into() {
-                Self::compress(&mut state, block);
-            }
+        for chunk in block[..tail + 8].as_chunks::<64>().0 {
+            Self::compress(&mut state, chunk);
         }
         let mut out = String::with_capacity(64);
         for word in state {
@@ -257,8 +253,8 @@ impl Sha256 {
 
     fn compress(state: &mut [u32; 8], block: &[u8; 64]) {
         let mut w = [0_u32; 64];
-        for (index, word) in block.chunks_exact(4).enumerate() {
-            w[index] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
+        for (index, word) in block.as_chunks::<4>().0.iter().enumerate() {
+            w[index] = u32::from_be_bytes(*word);
         }
         for index in 16..64 {
             let s0 = w[index - 15].rotate_right(7)

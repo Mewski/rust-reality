@@ -2,7 +2,7 @@
 name = "rr-linux"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.96"
+rust-version = "1.99"
 description = "The no_std Linux ABI boundary isolating raw kernel mechanisms from the rust-reality protocol crate"
 license = "MIT OR Apache-2.0"
 publish = false

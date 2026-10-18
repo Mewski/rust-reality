@@ -1668,11 +1668,13 @@ mod tests {
     }
 
     fn hex_vec(encoded: &str) -> Vec<u8> {
-        encoded
+        let bytes: Vec<u8> = encoded
             .bytes()
             .filter(|byte| !byte.is_ascii_whitespace())
-            .collect::<Vec<_>>()
-            .chunks_exact(2)
+            .collect();
+        let (pairs, _) = bytes.as_chunks::<2>();
+        pairs
+            .iter()
             .map(|pair| {
                 let decode = |byte| match byte {
                     b'0'..=b'9' => byte - b'0',

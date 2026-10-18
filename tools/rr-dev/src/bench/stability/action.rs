@@ -155,7 +155,7 @@ fn network_commands(action: &Action) -> Result<(), String> {
     if action.commands.len() != interfaces.len() * 3 {
         return Err("missing network fault observations".to_owned());
     }
-    for (interface, commands) in interfaces.iter().zip(action.commands.chunks_exact(3)) {
+    for (interface, commands) in interfaces.iter().zip(action.commands.as_chunks::<3>().0) {
         let show = ["tc", "-j", "qdisc", "show", "dev", interface];
         qdisc(
             command(&commands[0], &show, action)?,

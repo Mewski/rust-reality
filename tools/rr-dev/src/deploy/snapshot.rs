@@ -617,7 +617,7 @@ mod tests {
             .output()
             .unwrap();
         assert!(old.status.success());
-        assert!(!old.stdout.is_empty());
+        assert_ne!(old.stdout, Vec::<u8>::new());
 
         let topology = Topology::canonical().unwrap();
         let host = topology.host(HostRole::Line);

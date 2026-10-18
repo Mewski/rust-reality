@@ -267,10 +267,8 @@ fn require_attribution_support(attribution: Attribution) -> Result<(), String> {
 /// still stops the processes, removes the workspace, and releases the host lock.
 pub fn run_setup_rate(suite: &SetupRateSuite) -> Result<SuiteOutcome, String> {
     validate(suite)?;
-    for program in ["openssl"] {
-        if !Tool::exists(program) {
-            return Err(format!("required program unavailable: {program}"));
-        }
+    if !Tool::exists("openssl") {
+        return Err("required program unavailable: openssl".to_owned());
     }
     require_attribution_support(suite.attribution)?;
 
@@ -1772,10 +1770,8 @@ struct FallbackSlot {
 /// Returns the first failure; every resource is RAII-owned.
 pub fn run_fallback(suite: &FallbackSuite) -> Result<SuiteOutcome, String> {
     validate_fallback(suite)?;
-    for program in ["curl"] {
-        if !Tool::exists(program) {
-            return Err(format!("required program unavailable: {program}"));
-        }
+    if !Tool::exists("curl") {
+        return Err("required program unavailable: curl".to_owned());
     }
     if matches!(suite.attribution, Attribution::Perf(_)) && !Tool::exists("perf") {
         return Err("MEASURE_MODE=perf requires perf".to_owned());

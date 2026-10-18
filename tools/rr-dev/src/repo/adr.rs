@@ -123,29 +123,29 @@ mod tests {
 
     #[test]
     fn metadata_accepts_both_canonical_status_shapes() {
-        assert!(
+        assert_eq!(
             metadata_failures(
                 "docs/adr/0001-one.md",
                 "0001",
                 "# ADR 0001: One\n\n- Status: Accepted\n"
-            )
-            .is_empty()
+            ),
+            [] as [std::string::String; 0]
         );
-        assert!(
+        assert_eq!(
             metadata_failures(
                 "docs/adr/0002-two.md",
                 "0002",
                 "# ADR 0002: Two\n\n## Status\n\nRejected on measurement\n"
-            )
-            .is_empty()
+            ),
+            [] as [std::string::String; 0]
         );
-        assert!(
-            !metadata_failures(
+        assert_ne!(
+            metadata_failures(
                 "docs/adr/0003-three.md",
                 "0003",
                 "# Decision without number\n\nStatus: Pending\n"
-            )
-            .is_empty()
+            ),
+            [] as [std::string::String; 0]
         );
     }
 }

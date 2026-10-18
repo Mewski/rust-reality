@@ -491,7 +491,7 @@ mod tests {
         assert_eq!(report.performance_verdict, Verdict::Pass);
         assert_eq!(report.gate_verdict, Verdict::Pass);
         assert_eq!(report.overall_verdict, Verdict::Pass);
-        assert!(report.data_quality_failures.is_empty());
+        assert_eq!(report.data_quality_failures, Vec::<String>::new());
     }
 
     #[test]

@@ -911,10 +911,8 @@ pub fn run(suite: &VlessSuite) -> Result<crate::bench::paired::SuiteOutcome, Str
     };
 
     validate(suite)?;
-    for program in ["curl"] {
-        if !Tool::exists(program) {
-            return Err(format!("required program unavailable: {program}"));
-        }
+    if !Tool::exists("curl") {
+        return Err("required program unavailable: curl".to_owned());
     }
     let xray = identity::register("xray", &suite.xray_bin, "", Kind::Xray)?;
     let _lock = HostLock::acquire(&crate::bench::runner::default_lock_path())?;

@@ -988,7 +988,7 @@ impl SplicePool {
     fn new(max_relays: u32, fd_budget: FdBudget, pipe_pool: Option<(bool, u32)>) -> Self {
         Self {
             permits: Arc::new(Semaphore::new(
-                usize::try_from(max_relays).map_or(usize::MAX, |value| value),
+                usize::try_from(max_relays).unwrap_or(usize::MAX),
             )),
             pipes: pipe_pool.and_then(|(enabled, keep)| {
                 enabled.then(|| PipePool::new(keep, fd_budget.clone()))

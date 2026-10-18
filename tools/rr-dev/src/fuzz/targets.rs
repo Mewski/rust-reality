@@ -231,7 +231,7 @@ mod tests {
     #[test]
     fn the_repository_manifest_is_valid_and_nonempty() {
         let names = all(&repo_root()).expect("the checked-in fuzz manifest must validate");
-        assert!(!names.is_empty());
+        assert_ne!(names, Vec::<String>::new());
         let unique: BTreeSet<&String> = names.iter().collect();
         assert_eq!(unique.len(), names.len(), "target names must be unique");
     }

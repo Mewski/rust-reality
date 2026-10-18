@@ -281,7 +281,7 @@ impl std::error::Error for StatsError {}
 /// Omitting it reproduces Shewchuk's *value* but not Python's *rounding*, which was
 /// measured here as a one-ULP disagreement against recorded gate evidence — small,
 /// but the whole point of this migration is that the numbers do not move.
-#[expect(
+#[allow(
     clippy::float_cmp,
     reason = "an exact-zero residual is the stopping condition; an epsilon would change the rounding"
 )]
@@ -629,7 +629,7 @@ pub fn oriented_log_ratios(
 }
 
 #[cfg(test)]
-#[expect(
+#[allow(
     clippy::float_cmp,
     reason = "these are golden-parity tests: bit-exact comparison against recorded \
               evidence is the property under test, so an epsilon would defeat them"

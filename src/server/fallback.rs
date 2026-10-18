@@ -369,8 +369,7 @@ impl RealityFallback {
             .await
             .map_err(|_| FallbackError::SessionTimeout)?
             .map_err(FallbackError::Io)?;
-        let forwarded_prefix =
-            u64::try_from(consumed_prefix.len()).map_or(u64::MAX, |length| length);
+        let forwarded_prefix = u64::try_from(consumed_prefix.len()).unwrap_or(u64::MAX);
         Ok(CoverConnection {
             stream,
             governor: self.governor.clone(),
@@ -486,8 +485,7 @@ impl CoverConnection {
                 .relay_owned(inbound, self.stream, RelayContext::owned())
                 .await
                 .map_err(FallbackError::Io)?;
-            let returned_prefix =
-                u64::try_from(consumed_target_prefix.len()).map_or(u64::MAX, |length| length);
+            let returned_prefix = u64::try_from(consumed_target_prefix.len()).unwrap_or(u64::MAX);
             Ok(FallbackStats {
                 forwarded_prefix: self.forwarded_prefix,
                 returned_prefix,

@@ -479,7 +479,7 @@ mod tests {
             panic!("resource object");
         };
         resources.insert("publicLine".to_owned(), resources["line"].clone());
-        assert!(evaluate(&report).0.is_empty());
+        assert_eq!(evaluate(&report).0, Vec::<String>::new());
         let Value::Object(root) = &mut report else {
             panic!("fixture object");
         };
@@ -564,7 +564,7 @@ mod tests {
         let _ = base;
         let report = json_in::parse(&text).expect("bad fixture parses");
         let (reasons, _, _) = evaluate(&report);
-        assert!(!reasons.is_empty());
+        assert_ne!(reasons, Vec::<String>::new());
         assert!(
             reasons.iter().any(|r| r.contains("lineReload")),
             "{reasons:?}"

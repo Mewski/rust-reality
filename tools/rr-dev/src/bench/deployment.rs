@@ -4163,8 +4163,14 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&root);
         write_routing_assets(&root).unwrap();
-        assert!(!std::fs::read(root.join("geosite.dat")).unwrap().is_empty());
-        assert!(!std::fs::read(root.join("geoip.dat")).unwrap().is_empty());
+        assert_ne!(
+            std::fs::read(root.join("geosite.dat")).unwrap(),
+            Vec::<u8>::new()
+        );
+        assert_ne!(
+            std::fs::read(root.join("geoip.dat")).unwrap(),
+            Vec::<u8>::new()
+        );
         let uuids = uuids(4);
         let cases = route_cases(&RouteMatrixInput {
             uuids: &uuids,
