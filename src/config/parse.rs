@@ -28,7 +28,7 @@ use serde::Deserialize;
 
 use super::{
     diagnostic::Diagnostic,
-    node::{EntryConfig, LandingConfig, NodeConfig, Role},
+    node::{ClientConfig, EntryConfig, LandingConfig, NodeConfig, Role},
 };
 
 /// Largest accepted configuration file.
@@ -140,6 +140,8 @@ pub fn parse_bytes(path: &Path, bytes: &[u8]) -> Result<NodeConfig, ParseError> 
             .map(|entry| NodeConfig::Entry(Box::new(entry))),
         Some(Role::Landing) => deserialize::<LandingConfig>(path, &text, bytes)
             .map(|landing| NodeConfig::Landing(Box::new(landing))),
+        Some(Role::Client) => deserialize::<ClientConfig>(path, &text, bytes)
+            .map(|client| NodeConfig::Client(Box::new(client))),
         None => deserialize::<super::landing_v18::LandingV18>(path, &text, bytes)?
             .into_node()
             .map_err(|message| decode_failure(path, &text, "", serde::de::Error::custom(message))),

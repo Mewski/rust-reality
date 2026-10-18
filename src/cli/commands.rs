@@ -42,6 +42,16 @@ pub fn run(cli: Cli) -> Result<(), CliError> {
     }
 }
 
+fn run_client_node(client: &crate::config::node::ClientConfig) -> Result<(), CliError> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(crate::client::run_client(client));
+    runtime.shutdown_timeout(std::time::Duration::from_secs(5));
+    result.map_err(|error| CliError::Io(std::io::Error::other(error.to_string())))?;
+    Ok(())
+}
+
 pub(crate) fn run_server(arguments: ConfigPath) -> Result<(), CliError> {
     // Bootstrap order: parse the CLI, load and validate the configuration,
     // inspect the cgroup/machine view, choose the runtime topology, build the
@@ -49,6 +59,9 @@ pub(crate) fn run_server(arguments: ConfigPath) -> Result<(), CliError> {
     // reads — never a benchmark — so readiness is not delayed, and the server
     // reuses this report instead of detecting again.
     let config = load(&arguments.config)?;
+    if let Some(client) = config.node().as_client() {
+        return run_client_node(client);
+    }
     let machine = crate::runtime::machine::MachineReport::detect();
     let resource_mode =
         crate::runtime::policy::resolve_resource_mode(config.node().runtime().profile(), &machine);

@@ -90,6 +90,11 @@ pub(super) fn build(
     // built: the policy derivation and the descriptor budget share this
     // one detection.
     let node = config.into_node();
+    if node.as_client().is_some() {
+        return Err(ProductionServerError::Runtime(
+            RuntimeUpdateError::UnsupportedRole("client"),
+        ));
+    }
     let runtime = node.runtime();
     let (resource_mode, machine) = match machine {
         Some(machine) => (resolve_resource_mode(runtime.profile(), &machine), machine),

@@ -43,6 +43,8 @@ pub enum RuntimeUpdateError {
     Relay(TcpRelayConfigError),
     GenerationExhausted,
     Unavailable,
+    /// ProductionServer only serves entry and landing roles; client uses the dedicated runtime.
+    UnsupportedRole(&'static str),
 }
 
 impl fmt::Display for RuntimeUpdateError {
@@ -86,6 +88,10 @@ impl fmt::Display for RuntimeUpdateError {
             Self::Relay(source) => source.fmt(formatter),
             Self::GenerationExhausted => formatter.write_str("runtime generation exhausted"),
             Self::Unavailable => formatter.write_str("runtime update is unavailable"),
+            Self::UnsupportedRole(role) => write!(
+                formatter,
+                "role `{role}` is served by the client runtime, not ProductionServer"
+            ),
         }
     }
 }
@@ -110,7 +116,8 @@ impl Error for RuntimeUpdateError {
             | Self::ReplayPolicyChanged
             | Self::ResourceModeChanged
             | Self::GenerationExhausted
-            | Self::Unavailable => None,
+            | Self::Unavailable
+            | Self::UnsupportedRole(_) => None,
         }
     }
 }

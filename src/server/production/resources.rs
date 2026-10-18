@@ -64,6 +64,7 @@ pub(super) fn maximum_warm_pool_count(node: &NodeConfig) -> usize {
     let declared = match node {
         NodeConfig::Entry(entry) => entry.outbounds.as_ref(),
         NodeConfig::Landing(landing) => landing.outbounds.as_ref(),
+        NodeConfig::Client(_) => None,
     };
     let outbound = declared
         .into_iter()

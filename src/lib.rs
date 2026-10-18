@@ -19,6 +19,7 @@ pub const BUILD_COMMIT: &str = match option_env!("RUST_REALITY_GIT_COMMIT") {
 
 pub mod assets;
 pub mod cli;
+pub mod client;
 pub mod config;
 pub mod crypto;
 pub mod explain;

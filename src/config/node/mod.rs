@@ -2,9 +2,9 @@
 //!
 //! One node, one role. `role` is the first thing in the file and it decides
 //! which sections exist: an `entry` node has a REALITY identity, users, and
-//! routing; a `landing` node has an internal protocol and one egress. Neither
-//! shape can express the other, so a configuration that mixes them fails on
-//! the offending field rather than starting a server that is half of each.
+//! routing; a `landing` node has an internal protocol and one egress; a
+//! `client` node has local SOCKS5 listeners and REALITY LINEs. Roles cannot
+//! express each other, so a mixed configuration fails on the offending field.
 //!
 //! Every field with a default is an `Option`. Nothing here applies a default
 //! during deserialization, because the difference between "the operator wrote
@@ -18,6 +18,7 @@
 //! handling is a change to one small file.
 
 pub mod assets;
+pub mod client;
 pub mod dns;
 pub mod entry;
 pub mod landing;
@@ -34,6 +35,7 @@ pub mod user;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub use client::{ClientConfig, ClientRole, LineConfig};
 pub use entry::{EntryConfig, EntryRole};
 pub use landing::{LandingConfig, LandingProtocol, LandingRole, LandingTiming};
 pub use listener::{ListenFamily, ListenerConfig};
@@ -56,6 +58,8 @@ pub enum NodeConfig {
     Entry(Box<EntryConfig>),
     /// A firewall-restricted node that terminates an internal transfer.
     Landing(Box<LandingConfig>),
+    /// A local SOCKS5 client that dials authenticated REALITY LINEs.
+    Client(Box<ClientConfig>),
 }
 
 impl NodeConfig {
@@ -65,6 +69,7 @@ impl NodeConfig {
         match self {
             Self::Entry(_) => Role::Entry,
             Self::Landing(_) => Role::Landing,
+            Self::Client(_) => Role::Client,
         }
     }
 
@@ -73,7 +78,7 @@ impl NodeConfig {
     pub fn as_entry(&self) -> Option<&EntryConfig> {
         match self {
             Self::Entry(entry) => Some(entry),
-            Self::Landing(_) => None,
+            Self::Landing(_) | Self::Client(_) => None,
         }
     }
 
@@ -82,7 +87,16 @@ impl NodeConfig {
     pub fn as_landing(&self) -> Option<&LandingConfig> {
         match self {
             Self::Landing(landing) => Some(landing),
-            Self::Entry(_) => None,
+            Self::Entry(_) | Self::Client(_) => None,
+        }
+    }
+
+    /// The client configuration, when this node is a client node.
+    #[must_use]
+    pub fn as_client(&self) -> Option<&ClientConfig> {
+        match self {
+            Self::Client(client) => Some(client),
+            Self::Entry(_) | Self::Landing(_) => None,
         }
     }
 
@@ -92,6 +106,7 @@ impl NodeConfig {
         match self {
             Self::Entry(entry) => &entry.listeners,
             Self::Landing(landing) => &landing.listeners,
+            Self::Client(client) => &client.listeners,
         }
     }
 
@@ -101,6 +116,7 @@ impl NodeConfig {
         let configured = match self {
             Self::Entry(entry) => entry.runtime.as_ref(),
             Self::Landing(landing) => landing.runtime.as_ref(),
+            Self::Client(client) => client.runtime.as_ref(),
         };
         configured.cloned().unwrap_or_default()
     }
@@ -111,6 +127,7 @@ impl NodeConfig {
         let configured = match self {
             Self::Entry(entry) => entry.log.as_ref(),
             Self::Landing(landing) => landing.log.as_ref(),
+            Self::Client(client) => client.log.as_ref(),
         };
         configured.cloned().unwrap_or_default()
     }
@@ -121,6 +138,7 @@ impl NodeConfig {
         let configured = match self {
             Self::Entry(entry) => entry.network.as_ref(),
             Self::Landing(landing) => landing.network.as_ref(),
+            Self::Client(_) => None,
         };
         configured.copied().unwrap_or_default()
     }
@@ -131,6 +149,7 @@ impl NodeConfig {
         let configured = match self {
             Self::Entry(entry) => entry.dns.as_ref(),
             Self::Landing(landing) => landing.dns.as_ref(),
+            Self::Client(client) => client.dns.as_ref(),
         };
         configured.cloned().unwrap_or_default()
     }
@@ -144,6 +163,8 @@ pub enum Role {
     Entry,
     /// A firewall-restricted node that terminates an internal transfer.
     Landing,
+    /// A local SOCKS5 client that dials authenticated REALITY LINEs.
+    Client,
 }
 
 impl Role {
@@ -153,11 +174,12 @@ impl Role {
         match self {
             Self::Entry => "entry",
             Self::Landing => "landing",
+            Self::Client => "client",
         }
     }
 
     /// Every role name, for diagnostics that list the alternatives.
-    pub const ALL: [&'static str; 2] = ["entry", "landing"];
+    pub const ALL: [&'static str; 3] = ["entry", "landing", "client"];
 }
 
 /// Renders the JSON Schema of the current configuration.
@@ -177,6 +199,7 @@ pub fn schema_json() -> Result<String, serde_json::Error> {
         "oneOf": [
             schemars::schema_for!(EntryConfig),
             schemars::schema_for!(LandingConfig),
+            schemars::schema_for!(ClientConfig),
         ],
     });
     let mut output = serde_json::to_string_pretty(&schema)?;
@@ -332,7 +355,8 @@ mod tests {
     fn role_names_are_stable_and_exhaustively_listed() {
         assert_eq!(Role::Entry.as_str(), "entry");
         assert_eq!(Role::Landing.as_str(), "landing");
-        assert_eq!(Role::ALL, ["entry", "landing"]);
+        assert_eq!(Role::Client.as_str(), "client");
+        assert_eq!(Role::ALL, ["entry", "landing", "client"]);
     }
 
     #[test]
