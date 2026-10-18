@@ -8,9 +8,13 @@ live in [development/fuzzing.md](../development/fuzzing.md).
 
 ## Covered
 
+The shared client VLESS response decoder and TCP request encoder round trips
+are exercised by `wire_parsers`, including preservation of trailing payload.
+
 | Attack surface | Entry point(s) | Fuzz target |
 | --- | --- | --- |
 | VLESS request decode (owned + zero-copy ref) | `vless::decode_request`, `fuzz_decode_request_ref` | `wire_parsers` |
+| VLESS client TCP request encode + response decode | `vless::encode_vision_tcp_request`, `vless::decode_response` | `wire_parsers` |
 | REALITY ClientHello record + message parse | `ClientHello::parse_record`, `ClientHello::parse_message` | `wire_parsers` |
 | ClientHello extension walk (SNI, ALPN, key share, supported versions) | inside `ClientHello::parse_message` | `wire_parsers` |
 | Short-ID selection / owner index | inside REALITY auth, driven by parsed ClientHello | `wire_parsers` (partial: parse only; auth needs valid signatures) |
@@ -28,7 +32,7 @@ live in [development/fuzzing.md](../development/fuzzing.md).
 | Handshake transcript hash | `TranscriptHasher` vs `HashAlgorithm::digest` | `transcript_diff` (differential: incremental == one-shot for all chunkings) |
 | Config JSON deserialization + normalization + validation | `config::fuzz_decode_config` (exact `load_config` decode path) | `config_json` (structured generator via `arbitrary`, all values synthetic) |
 | REALITY authentication round trip | REALITY auth handshake | `reality_auth_round_trip` |
-| Session-engine semantics | `rr-session` state machines | `session_semantics` |
+| Session-engine semantics | `rr-session` state machines including `ClientRace` | `session_semantics` |
 | Configuration diagnostics | diagnostic rendering on malformed config | `config_diagnostic` |
 
 ## Gaps (with justification)
