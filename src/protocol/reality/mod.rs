@@ -3,6 +3,8 @@
 mod auth;
 mod client_hello;
 mod client_offer;
+mod client_verify;
+mod client_handshake;
 mod read;
 mod replay;
 pub mod tls13;
@@ -31,3 +33,7 @@ pub(crate) use client_hello::fixtures as client_hello_fixtures;
 pub use client_offer::{
     ClientKeyAgreement, HelloError, HelloRecord, TlsSharedSecret, build_client_hello,
 };
+pub use client_handshake::{
+    ClientHandshakeError, ClientSession, Negotiated, complete, establish_with_server_flight,
+};
+pub use client_verify::{CertificateError, parse_encrypted_extensions, verify_server_certificate};

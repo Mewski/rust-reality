@@ -90,6 +90,7 @@ const PROVIDERS: &[(&str, &[&str])] = &[
             "src/protocol/nxr.rs",
             "src/protocol/reality/auth.rs",
             "src/protocol/reality/client_hello.rs",
+            "src/protocol/reality/client_verify.rs",
             "src/protocol/reality/replay.rs",
             "src/protocol/reality/tls13/keys.rs",
             "src/protocol/reality/tls13/messages.rs",
@@ -100,6 +101,7 @@ const PROVIDERS: &[(&str, &[&str])] = &[
         "hmac",
         &[
             "src/protocol/nxr.rs",
+            "src/protocol/reality/client_verify.rs",
             "src/protocol/reality/tls13/keys.rs",
             "src/protocol/reality/tls13/messages.rs",
         ],
@@ -113,7 +115,13 @@ const PROVIDERS: &[(&str, &[&str])] = &[
         ],
     ),
     // The signature provider, used once per session for CertificateVerify.
-    ("ed25519_dalek", &["src/protocol/reality/tls13/messages.rs"]),
+    (
+        "ed25519_dalek",
+        &[
+            "src/protocol/reality/client_verify.rs",
+            "src/protocol/reality/tls13/messages.rs",
+        ],
+    ),
     // C3c removed the last production call site: every remaining `src/` file
     // names `x25519_dalek` only from test code — the independent oracle the
     // in-file differential tests and `tests/x25519_differential.rs` compare
@@ -128,6 +136,8 @@ const PROVIDERS: &[(&str, &[&str])] = &[
             "src/crypto/x25519.rs",
             "src/protocol/handoff.rs",
             "src/protocol/reality/auth.rs",
+            "src/protocol/reality/client_handshake.rs",
+            "src/protocol/reality/client_offer.rs",
             "src/protocol/reality/tls13/handshake.rs",
         ],
     ),
@@ -137,11 +147,20 @@ const PROVIDERS: &[(&str, &[&str])] = &[
         "ml_kem",
         &[
             "src/protocol/reality/client_hello.rs",
+            "src/protocol/reality/client_offer.rs",
             "src/protocol/reality/tls13/handshake.rs",
         ],
     ),
-    // Constant-time comparison, one production use: the client Finished check.
-    ("subtle", &["src/protocol/reality/tls13/handshake.rs"]),
+    // Constant-time comparison: server ClientFinished and client certificate
+    // binding / Finished checks.
+    (
+        "subtle",
+        &[
+            "src/protocol/reality/client_handshake.rs",
+            "src/protocol/reality/client_verify.rs",
+            "src/protocol/reality/tls13/handshake.rs",
+        ],
+    ),
 ];
 
 /// Source spelling alone cannot detect an unused, renamed or transitive

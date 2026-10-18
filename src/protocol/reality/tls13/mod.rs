@@ -40,6 +40,7 @@ pub use keys::{
     ApplicationTrafficSecrets, CipherSuite, FinishedVerifyData, HashAlgorithm, Tls13KeySchedule,
     Tls13KeyScheduleError, TrafficKeys, TrafficSecret, TranscriptHash,
 };
+pub(crate) use keys::TranscriptHasher;
 pub use messages::{
     CertificateIdentity, HandshakeMessageError, certificate_message, encrypted_extensions,
     finished_message,

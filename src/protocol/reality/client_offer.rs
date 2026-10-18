@@ -19,10 +19,6 @@ use super::{
 use crate::crypto::{SharedSecret, StaticX25519Key, entropy};
 
 const X25519_PUBLIC_LEN: usize = 32;
-#[allow(
-    dead_code,
-    reason = "consumed by client TLS handshake in the same PR series"
-)] // selected by tls_shared_secret once the client handshake lands
 const MLKEM768_CIPHERTEXT_LEN: usize = 1_088;
 const MLKEM768_ENCAP_KEY_LEN: usize = 1_184;
 
@@ -120,16 +116,8 @@ pub struct ClientKeyAgreement {
     x25519: StaticX25519Key,
     x25519_public: [u8; X25519_PUBLIC_LEN],
     // Hybrid private state is read by `tls_shared_secret` during the TLS handshake.
-    #[allow(
-        dead_code,
-        reason = "consumed by client TLS handshake in the same PR series"
-    )]
     hybrid_x25519: StaticX25519Key,
     hybrid_x25519_public: [u8; X25519_PUBLIC_LEN],
-    #[allow(
-        dead_code,
-        reason = "consumed by client TLS handshake in the same PR series"
-    )]
     hybrid_mlkem: DecapsulationKey768,
     hybrid_encap: [u8; MLKEM768_ENCAP_KEY_LEN],
 }
@@ -172,10 +160,6 @@ impl ClientKeyAgreement {
     }
 
     /// Agrees the TLS 1.3 ECDHE secret for the group the server selected.
-    #[allow(
-        dead_code,
-        reason = "consumed by client TLS handshake in the same PR series"
-    )] // wired by the client TLS handshake module in this PR series
     pub(crate) fn tls_shared_secret(
         &self,
         group: u16,
@@ -468,10 +452,6 @@ fn generate_mlkem() -> Result<(DecapsulationKey768, [u8; MLKEM768_ENCAP_KEY_LEN]
     Ok((decapsulation, hybrid_encap))
 }
 
-#[allow(
-    dead_code,
-    reason = "consumed by client TLS handshake in the same PR series"
-)] // wired by tls_shared_secret / client handshake
 fn mlkem_decapsulate(
     decapsulation: &DecapsulationKey768,
     ciphertext: &[u8],
