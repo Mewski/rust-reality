@@ -26,7 +26,7 @@ mod syntax;
 pub use diagnostic::Diagnostic;
 pub use format::canonical;
 pub use load::{LoadError, load, load_bytes};
-pub use node::{EntryConfig, LandingConfig, NodeConfig, Role};
+pub use node::{ClientConfig, EntryConfig, LandingConfig, LineConfig, NodeConfig, Role};
 pub use parse::{MAX_CONFIG_BYTES, ParseError};
 pub use secret::SecretString;
 pub use semantics::{SemanticError, ValidatedConfig};

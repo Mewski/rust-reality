@@ -23,8 +23,8 @@ use zeroize::Zeroizing;
 
 use super::{
     node::{
-        DomainStrategy, EntryConfig, LandingConfig, LandingProtocol, NodeConfig, OutboundConfig,
-        Role, RoutePolicy, RouteRule, RoutingConfig,
+        ClientConfig, DomainStrategy, EntryConfig, LandingConfig, LandingProtocol, NodeConfig,
+        OutboundConfig, Role, RoutePolicy, RouteRule, RoutingConfig,
         dns::DnsConfig,
         listener::ListenerConfig,
         log::{LogConfig, LogOutput},
@@ -133,8 +133,99 @@ pub fn validate(node: NodeConfig) -> Result<ValidatedConfig, SemanticError> {
     match &node {
         NodeConfig::Entry(entry) => validate_entry(entry)?,
         NodeConfig::Landing(landing) => validate_landing(landing)?,
+        NodeConfig::Client(client) => validate_client(client)?,
     }
     Ok(ValidatedConfig(node))
+}
+
+// --------------------------------------------------------------- client role
+
+fn validate_client(client: &ClientConfig) -> Result<(), SemanticError> {
+    validate_listeners(&client.listeners)?;
+    for listener in &client.listeners {
+        let v4 = listener.ipv4_address();
+        let v6 = listener.ipv6_address();
+        if !v4.is_loopback() && v4 != std::net::Ipv4Addr::UNSPECIFIED {
+            // Client SOCKS5 must stay on loopback in this PR; remote bind is PR4+.
+            if !v4.is_unspecified() && !v4.is_loopback() {
+                return fail(
+                    "listeners",
+                    "client SOCKS5 listeners must bind loopback (127.0.0.1 or ::1)",
+                );
+            }
+        }
+        let _ = v6;
+    }
+    // Prefer explicit loopback: reject unspecified (0.0.0.0) for client.
+    for (index, listener) in client.listeners.iter().enumerate() {
+        let path = format!("listeners[{index}]");
+        match listener.ipv4 {
+            Some(addr) if addr.is_loopback() => {}
+            Some(_) => {
+                return fail(
+                    format!("{path}.ipv4"),
+                    "client SOCKS5 must bind a loopback address",
+                );
+            }
+            None => {
+                // Absent ipv4 with auto family would bind all interfaces — refuse.
+                return fail(
+                    format!("{path}.ipv4"),
+                    "client SOCKS5 must set ipv4 to 127.0.0.1",
+                );
+            }
+        }
+    }
+    if client.lines.is_empty() {
+        return fail("lines", "must contain at least one REALITY LINE");
+    }
+    if client.lines.len() != 1 {
+        return fail(
+            "lines",
+            "single-LINE client requires exactly one LINE in this PR",
+        );
+    }
+    for (index, line) in client.lines.iter().enumerate() {
+        let path = format!("lines[{index}]");
+        if line.address.is_empty() {
+            return fail(format!("{path}.address"), "must not be empty");
+        }
+        if line.port == 0 {
+            return fail(format!("{path}.port"), "must not be zero");
+        }
+        if !syntax::is_uuid(&line.id) {
+            return fail(
+                format!("{path}.id"),
+                "must be a canonical hyphenated UUID from `rust-reality generate uuid`",
+            );
+        }
+        if syntax::decode_key(&line.public_key).is_none() {
+            return fail(
+                format!("{path}.publicKey"),
+                "must be a 32-byte URL-safe unpadded base64 X25519 public key",
+            );
+        }
+        if !syntax::is_short_id(&line.short_id) {
+            return fail(
+                format!("{path}.shortId"),
+                "must be 2 to 16 hexadecimal characters, an even number of them",
+            );
+        }
+        if line.server_name.is_empty()
+            || line.server_name.len() > 253
+            || !line.server_name.is_ascii()
+            || line.server_name.contains(':')
+        {
+            return fail(
+                format!("{path}.serverName"),
+                "must be a concrete ASCII DNS name without a port",
+            );
+        }
+    }
+    validate_dns(client.dns.as_ref())?;
+    validate_log(client.log.as_ref())?;
+    validate_runtime(client.runtime.as_ref())?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------- entry role

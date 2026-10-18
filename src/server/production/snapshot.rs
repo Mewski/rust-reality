@@ -98,6 +98,9 @@ impl RuntimeSnapshot {
                     outbounds,
                 )
             }
+            NodeConfig::Client(_) => {
+                return Err(RuntimeUpdateError::UnsupportedRole("client"));
+            }
             NodeConfig::Landing(landing) => {
                 let outbounds = OutboundRegistry::with_warm_pools(
                     &landing.outbounds.clone().unwrap_or_default(),

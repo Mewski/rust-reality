@@ -109,6 +109,10 @@ fn listener_topology(node: &NodeConfig) -> HashMap<SocketAddr, ListenerTopology>
             LandingProtocol::Nxr(_) => ListenerRole::Nxr,
             LandingProtocol::Handoff(_) => ListenerRole::Handoff,
         },
+        NodeConfig::Client(_) => {
+            // Client nodes never enter ProductionServer reload.
+            ListenerRole::Entry
+        }
     };
     node.listeners()
         .iter()
