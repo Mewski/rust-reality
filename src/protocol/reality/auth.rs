@@ -252,6 +252,49 @@ impl fmt::Display for RealityAuthError {
 
 impl Error for RealityAuthError {}
 
+/// The Xray-compatible client version advertised inside the authenticator.
+///
+/// The server records these three bytes and does not gate on them today; the
+/// value must remain a plausible Xray release identifier for interoperability.
+pub const CLIENT_VERSION: [u8; 3] = [26, 7, 28];
+
+/// The 16-byte REALITY session-id plaintext sealed into the ClientHello.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuthPlaintext {
+    /// Three-byte client version.
+    pub version: [u8; 3],
+    /// Client Unix time in seconds.
+    pub time: u32,
+    /// Short ID, right-zero-padded to eight bytes on the wire.
+    pub short_id: [u8; 8],
+}
+
+impl AuthPlaintext {
+    /// Encodes the authenticator plaintext. Byte 3 is reserved and always zero.
+    #[must_use]
+    pub const fn to_bytes(self) -> [u8; SESSION_PLAINTEXT_LEN] {
+        let time = self.time.to_be_bytes();
+        [
+            self.version[0],
+            self.version[1],
+            self.version[2],
+            0,
+            time[0],
+            time[1],
+            time[2],
+            time[3],
+            self.short_id[0],
+            self.short_id[1],
+            self.short_id[2],
+            self.short_id[3],
+            self.short_id[4],
+            self.short_id[5],
+            self.short_id[6],
+            self.short_id[7],
+        ]
+    }
+}
+
 /// Derived REALITY authentication key, zeroized on drop and redacted in debug output.
 #[derive(Clone, Eq, PartialEq, Zeroize, ZeroizeOnDrop)]
 pub struct AuthKey([u8; 32]);
@@ -261,6 +304,37 @@ impl AuthKey {
     #[must_use]
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
+    }
+
+    /// Derives the authentication key from the ECDHE shared secret and ClientHello random.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RealityAuthError::KeyDerivation`] when HKDF refuses the fixed-size inputs.
+    pub fn derive(
+        shared_secret: &[u8; 32],
+        client_random: &[u8; 32],
+    ) -> Result<Self, RealityAuthError> {
+        derive_auth_key(shared_secret, client_random)
+    }
+
+    /// Seals the 32-byte session ID for a ClientHello whose session ID is zeroed in `aad`.
+    ///
+    /// `aad` must be the handshake message with the 32-byte session ID set to zero — the
+    /// same buffer the server reconstructs the server reconstructs before opening.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RealityAuthError::OpenFailed`] when AES-GCM refuses the inputs (should not
+    /// occur for well-formed fixed-size plaintext).
+    pub fn seal_session_id(
+        &self,
+        client_random: &[u8; 32],
+        aad: &[u8],
+        plaintext: AuthPlaintext,
+    ) -> Result<[u8; 32], RealityAuthError> {
+        let nonce = aead_nonce_from_random(client_random);
+        seal_session_id(self.as_bytes(), &nonce, &plaintext.to_bytes(), aad)
     }
 
     #[cfg(test)]
@@ -573,6 +647,30 @@ fn open_session_id(
         .decrypt_inout_detached(&nonce, aad, plaintext.as_mut_slice().into(), &tag)
         .map_err(|_| RealityAuthError::OpenFailed)?;
     Ok(plaintext)
+}
+
+fn aead_nonce_from_random(client_random: &[u8; 32]) -> [u8; 12] {
+    let mut nonce = [0_u8; 12];
+    nonce.copy_from_slice(&client_random[20..]);
+    nonce
+}
+
+fn seal_session_id(
+    auth_key: &[u8; 32],
+    nonce: &[u8; 12],
+    plaintext: &[u8; SESSION_PLAINTEXT_LEN],
+    aad: &[u8],
+) -> Result<[u8; 32], RealityAuthError> {
+    let cipher = Aes256Gcm::new(&Array(*auth_key));
+    let nonce: Nonce<Aes256Gcm> = Array(*nonce);
+    let mut body = *plaintext;
+    let tag = cipher
+        .encrypt_inout_detached(&nonce, aad, body.as_mut_slice().into())
+        .map_err(|_| RealityAuthError::OpenFailed)?;
+    let mut output = [0_u8; 32];
+    output[..SESSION_PLAINTEXT_LEN].copy_from_slice(&body);
+    output[SESSION_PLAINTEXT_LEN..].copy_from_slice(&tag);
+    Ok(output)
 }
 
 pub(crate) fn decode_short_id(encoded: &str) -> Result<[u8; 8], RealityAuthConfigError> {

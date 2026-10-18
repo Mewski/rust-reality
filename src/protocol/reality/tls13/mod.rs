@@ -33,6 +33,7 @@ pub use handshake::{
 };
 pub use handshake_read::{ClientFinishedReadError, read_client_finished};
 pub use idle::{IdleDeadline, IdleError};
+pub(crate) use keys::TranscriptHasher;
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub use keys::fuzz_transcript_snapshot_matches;
