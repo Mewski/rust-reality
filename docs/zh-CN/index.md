@@ -15,6 +15,7 @@
 | 文档 | 用途 |
 | --- | --- |
 | [单机节点](configuration/standalone.md) | 一次一个决定地搭出单节点配置。 |
+| [客户端角色](configuration/client.md) | 本机 SOCKS5 / HTTP CONNECT 客户端，连到入口。 |
 | [用户与凭据](configuration/users-and-credentials.md) | 生成什么、哪一半放哪里、怎么轮换。 |
 | [伪装目标](configuration/cover-targets.md) | 挑选并验证这台服务器要伪装成的主机。 |
 | [出站](configuration/outbounds.md) | 两个内置出站，和你可以声明的三种。 |
@@ -60,7 +61,6 @@
 | [密码学实现](development/crypto-providers.md) | 生产实现、开发期 oracle 和依赖清单复现。 |
 | [测试](development/testing.md) | 验证分层、聚焦运行和工具链门禁。 |
 | [模糊测试](../en/development/fuzzing.md) | 攻击面覆盖、目标与命令（英文记录）。 |
-| [XUDP 与 Vision UDP/443](../en/development/xudp.md) | 区分 `xtls-rprx-vision-udp443` 策略与 XUDP 成帧；Direct-only 路由限制（英文记录）。 |
 | [工程宪法](../../AGENTS.md) | 面向贡献者和编码代理的规范性规则。 |
 
 ## 权威来源
