@@ -1,4 +1,9 @@
 //! One REALITY-authenticated LINE to an entry.
+//!
+//! Establishment is two phases so multi-LINE selection can race authentication
+//! only (ADR 0032): [`Line::handshake`] stops after REALITY; [`AuthenticatedLine::open`]
+//! sends the VLESS Vision request after the selector has adopted one candidate.
+//! A failed `open` is never retried on another LINE — that would replay the request.
 
 use std::{
     net::SocketAddr,
@@ -12,7 +17,8 @@ use crate::{
     config::node::LineConfig,
     protocol::{
         reality::{
-            AuthPlaintext, CLIENT_VERSION, ClientKeyAgreement, build_client_hello, complete,
+            AuthPlaintext, CLIENT_VERSION, ClientKeyAgreement, ClientSession, build_client_hello,
+            complete,
         },
         vless::{Destination, UserId},
     },
@@ -23,15 +29,24 @@ use super::session::{VisionTunnel, VisionTunnelError};
 const ALPN: &[&[u8]] = &[b"h2", b"http/1.1"];
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// A compiled LINE ready to establish tunnels.
+/// A compiled LINE ready to authenticate.
 #[derive(Clone, Debug)]
 pub struct Line {
+    tag: Option<String>,
     address: String,
     port: u16,
     user_id: UserId,
     public_key: [u8; 32],
     short_id: [u8; 8],
     server_name: String,
+}
+
+/// REALITY completed; VLESS Vision not yet started.
+pub struct AuthenticatedLine {
+    stream: TcpStream,
+    session: ClientSession,
+    user_id: UserId,
+    tag: Option<String>,
 }
 
 /// A LINE could not be compiled or established.
@@ -43,13 +58,18 @@ pub enum LineError {
     Dial(std::io::Error),
     /// REALITY handshake failed.
     Handshake(crate::protocol::reality::ClientHandshakeError),
-    /// Vision / VLESS session failed.
+    /// Vision / VLESS session failed after adoption (not retried on another LINE).
     Session(VisionTunnelError),
+    /// Multi-LINE selection exhausted candidates or hit the deadline.
+    Selection(&'static str),
 }
 
 impl std::fmt::Display for LineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("REALITY LINE failed")
+        match self {
+            Self::Selection(reason) => write!(f, "REALITY LINE selection failed: {reason}"),
+            _ => f.write_str("REALITY LINE failed"),
+        }
     }
 }
 
@@ -59,7 +79,7 @@ impl std::error::Error for LineError {
             Self::Dial(e) => Some(e),
             Self::Handshake(e) => Some(e),
             Self::Session(e) => Some(e),
-            Self::Config(_) => None,
+            Self::Config(_) | Self::Selection(_) => None,
         }
     }
 }
@@ -72,6 +92,7 @@ impl Line {
             decode_public_key(&config.public_key).ok_or(LineError::Config("publicKey"))?;
         let short_id = parse_short_id(&config.short_id).ok_or(LineError::Config("shortId"))?;
         Ok(Self {
+            tag: config.tag.clone(),
             address: config.address.clone(),
             port: config.port,
             user_id,
@@ -81,8 +102,14 @@ impl Line {
         })
     }
 
-    /// Dials the entry, completes REALITY, and opens a Vision tunnel to `destination`.
-    pub async fn establish(&self, destination: &Destination) -> Result<VisionTunnel, LineError> {
+    /// Optional operator label.
+    #[must_use]
+    pub fn tag(&self) -> Option<&str> {
+        self.tag.as_deref()
+    }
+
+    /// Dials and completes REALITY only — no VLESS request, no destination open.
+    pub async fn handshake(&self) -> Result<AuthenticatedLine, LineError> {
         let addr = resolve_line_address(&self.address, self.port)
             .await
             .map_err(LineError::Dial)?;
@@ -104,7 +131,6 @@ impl Line {
             build_client_hello(&self.server_name, ALPN, &keys, &self.public_key, auth)
                 .map_err(map_hello)?;
 
-        // Write ClientHello record first.
         let record = hello.record();
         tokio::io::AsyncWriteExt::write_all(&mut stream, &record)
             .await
@@ -117,7 +143,30 @@ impl Line {
             .await
             .map_err(LineError::Handshake)?;
 
-        VisionTunnel::connect(stream, session, self.user_id, destination)
+        Ok(AuthenticatedLine {
+            stream,
+            session,
+            user_id: self.user_id,
+            tag: self.tag.clone(),
+        })
+    }
+
+    /// Full path for single-LINE callers: handshake then Vision open.
+    pub async fn establish(&self, destination: &Destination) -> Result<VisionTunnel, LineError> {
+        self.handshake().await?.open(destination).await
+    }
+}
+
+impl AuthenticatedLine {
+    /// Optional operator label of the LINE that authenticated.
+    #[must_use]
+    pub fn tag(&self) -> Option<&str> {
+        self.tag.as_deref()
+    }
+
+    /// Sends the Vision TCP request. Must run only after selection adoption.
+    pub async fn open(self, destination: &Destination) -> Result<VisionTunnel, LineError> {
+        VisionTunnel::connect(self.stream, self.session, self.user_id, destination)
             .await
             .map_err(LineError::Session)
     }

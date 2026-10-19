@@ -41,6 +41,11 @@ pub struct ListenerConfig {
     /// Absent means SOCKS5 on client nodes. Entry and landing reject this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<InboundProtocol>,
+    /// LINE group name for the client role. Absent means `default`.
+    ///
+    /// Entry and landing reject this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_group: Option<String>,
 }
 
 /// Local inbound application protocol on a client listener.

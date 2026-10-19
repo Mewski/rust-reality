@@ -2,8 +2,8 @@
 //!
 //! A client node terminates no public REALITY identity. It listens locally,
 //! authenticates outbound to an entry, and relays application bytes through
-//! VLESS + REALITY + Vision. Single-LINE selection is the first shipping shape;
-//! multi-LINE selection remains a later PR.
+//! VLESS + REALITY + Vision. Multiple LINEs may be grouped; selection races
+//! authentication only and never migrates a committed session (ADR 0032).
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -18,8 +18,14 @@ pub struct ClientConfig {
     pub role: ClientRole,
     /// Local SOCKS5 and/or HTTP CONNECT endpoints. Loopback-only; `protocol` defaults to socks5.
     pub listeners: Vec<ListenerConfig>,
-    /// Authenticated LINEs to an entry. Exactly one LINE is required in PR3.
+    /// Authenticated LINEs to an entry. One or more; groups reference them by `tag`.
     pub lines: Vec<LineConfig>,
+    /// Named LINE groups for selection. Absent means one implicit `default` group of all lines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_groups: Option<Vec<LineGroupConfig>>,
+    /// Pre-commit selection timing. Absent uses sticky primary + 275 ms hedge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<LineSelectionConfig>,
     /// Name resolution for LINE addresses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dns: Option<DnsConfig>,
@@ -43,7 +49,7 @@ pub enum ClientRole {
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, JsonSchema, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct LineConfig {
-    /// Optional label for diagnostics.
+    /// Label for diagnostics and `lineGroups`. Required when `lineGroups` is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
     /// Entry host or IP without a scheme or port.
@@ -58,6 +64,29 @@ pub struct LineConfig {
     pub short_id: String,
     /// Server-accepted SNI / serverName.
     pub server_name: String,
+}
+
+/// A named set of LINE tags used for sticky + hedge selection.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct LineGroupConfig {
+    /// Group name; listeners may set `lineGroup` to this value.
+    pub name: String,
+    /// LINE `tag` values, sticky-primary first. At least one; at most eight.
+    pub lines: Vec<String>,
+}
+
+/// Timing for pre-commit LINE selection.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct LineSelectionConfig {
+    /// Milliseconds before starting the alternate while the primary is pending.
+    /// Absent means 275.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hedge_ms: Option<u64>,
+    /// Overall authentication budget in milliseconds. Absent means 15000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
 }
 
 #[cfg(test)]
@@ -86,27 +115,26 @@ mod tests {
     }
 
     #[test]
-    fn parses_http_connect_listener() {
+    fn parses_multi_line_group() {
         let json = r#"{
   "role": "client",
-  "listeners": [
-    {"port": 10808, "ipv4": "127.0.0.1"},
-    {"port": 10809, "ipv4": "127.0.0.1", "protocol": "http"}
+  "listeners": [{"port": 10808, "ipv4": "127.0.0.1", "lineGroup": "edge"}],
+  "lines": [
+    {"tag": "a", "address": "10.0.0.1", "port": 443,
+     "id": "11111111-1111-4111-8111-111111111111",
+     "publicKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+     "shortId": "0102030405060708", "serverName": "www.example.com"},
+    {"tag": "b", "address": "10.0.0.2", "port": 443,
+     "id": "11111111-1111-4111-8111-111111111111",
+     "publicKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+     "shortId": "0102030405060708", "serverName": "www.example.com"}
   ],
-  "lines": [{
-    "address": "127.0.0.1",
-    "port": 8443,
-    "id": "11111111-1111-4111-8111-111111111111",
-    "publicKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-    "shortId": "0102030405060708",
-    "serverName": "www.example.com"
-  }]
+  "lineGroups": [{"name": "edge", "lines": ["a", "b"]}],
+  "selection": {"hedgeMs": 200, "timeoutMs": 10000}
 }"#;
         let parsed: ClientConfig = serde_json::from_str(json).expect("parse");
-        assert_eq!(parsed.listeners.len(), 2);
-        assert_eq!(
-            parsed.listeners[1].protocol,
-            Some(super::super::listener::InboundProtocol::Http)
-        );
+        assert_eq!(parsed.lines.len(), 2);
+        assert_eq!(parsed.line_groups.as_ref().unwrap()[0].name, "edge");
+        assert_eq!(parsed.selection.as_ref().unwrap().hedge_ms, Some(200));
     }
 }

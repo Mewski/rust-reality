@@ -1,15 +1,19 @@
 //! Local SOCKS5 / HTTP CONNECT client that dials authenticated REALITY LINEs.
 //!
 //! The client role terminates no public REALITY identity. It accepts loopback
-//! SOCKS5 CONNECT and/or HTTP CONNECT, opens one LINE (REALITY → VLESS → Vision),
-//! and relays bytes.
+//! SOCKS5 CONNECT and/or HTTP CONNECT, opens a LINE (REALITY → VLESS → Vision)
+//! selected before any destination request (ADR 0032), and relays bytes.
+//! After a LINE is committed there is no mid-session migration and no request
+//! replay onto another LINE.
 
 mod http_inbound;
 mod line;
+mod selection;
 mod serve;
 mod session;
 mod socks5_inbound;
 
-pub use line::{Line, LineError};
+pub use line::{AuthenticatedLine, Line, LineError};
+pub use selection::{LineGroup, LinePool, SelectionPolicy};
 pub use serve::{ClientRuntimeError, run_client};
 pub use session::VisionTunnel;
