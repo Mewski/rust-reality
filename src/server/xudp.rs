@@ -478,4 +478,27 @@ mod tests {
         assert_eq!(assoc.downlink_datagrams(), 1);
         assoc.close(&globals, Instant::now());
     }
+
+    #[tokio::test]
+    async fn association_close_releases_global_slot_for_reuse() {
+        let echo = UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let dest = socket_addr_to_destination(echo.local_addr().unwrap());
+        let globals = XudpGlobalMap::new();
+        let now = Instant::now();
+        let gid = [7_u8; 8];
+        let assoc = XudpDirectAssociation::open(&dest, Some(gid), &globals, now)
+            .await
+            .unwrap();
+        assert_eq!(globals.len(), 1);
+        assoc.close(&globals, now);
+        assert_eq!(globals.len(), 0);
+        // Slot reusable after close (cancellation / control EOF path).
+        let again = XudpDirectAssociation::open(&dest, Some(gid), &globals, now)
+            .await
+            .unwrap();
+        assert_eq!(globals.len(), 1);
+        again.close(&globals, now);
+    }
 }
