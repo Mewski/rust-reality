@@ -60,6 +60,7 @@
 | [密码学实现](development/crypto-providers.md) | 生产实现、开发期 oracle 和依赖清单复现。 |
 | [测试](development/testing.md) | 验证分层、聚焦运行和工具链门禁。 |
 | [模糊测试](../en/development/fuzzing.md) | 攻击面覆盖、目标与命令（英文记录）。 |
+| [XUDP 与 Vision UDP/443](../en/development/xudp.md) | 区分 `xtls-rprx-vision-udp443` 策略与 XUDP 成帧；Direct-only 路由限制（英文记录）。 |
 | [工程宪法](../../AGENTS.md) | 面向贡献者和编码代理的规范性规则。 |
 
 ## 权威来源

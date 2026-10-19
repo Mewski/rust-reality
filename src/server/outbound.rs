@@ -280,6 +280,18 @@ impl OutboundRegistry {
             .await
     }
 
+    /// Classifies a routed outbound tag for XUDP eligibility (Direct only).
+    pub(crate) fn xudp_route_class(&self, tag: &str) -> crate::server::xudp::XudpRouteClass {
+        use crate::server::xudp::XudpRouteClass;
+        match self.outbounds.get(tag) {
+            Some(CompiledOutbound::Direct) => XudpRouteClass::Direct,
+            Some(CompiledOutbound::Nxr(_)) => XudpRouteClass::Nxr,
+            Some(CompiledOutbound::Handoff(_)) => XudpRouteClass::Handoff,
+            Some(CompiledOutbound::Block) => XudpRouteClass::Block,
+            Some(CompiledOutbound::Socks5(_)) | None => XudpRouteClass::Unsupported,
+        }
+    }
+
     /// Resolves one Vision route exactly once, returning a session handoff or
     /// the completed ordinary outbound decision.
     pub(crate) async fn connect_session_resolved(

@@ -60,6 +60,7 @@ English | [简体中文](../zh-CN/index.md)
 | [Cryptographic providers](development/crypto-providers.md) | Production providers, dev-only oracles, and dependency ledger reproduction. |
 | [Testing](development/testing.md) | The validation layers, focused runs, and the tooling gate. |
 | [Fuzzing](development/fuzzing.md) | Attack-surface coverage, targets, and commands. |
+| [XUDP and Vision UDP/443](development/xudp.md) | Distinguishes `xtls-rprx-vision-udp443` policy from XUDP framing; Direct-only route limits. |
 | [Engineering constitution](../../AGENTS.md) | Normative rules for contributors and coding agents. |
 
 ## Source of truth
