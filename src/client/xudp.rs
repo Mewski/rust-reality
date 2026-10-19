@@ -296,10 +296,19 @@ impl XudpTunnel {
         }
     }
 
+    /// True when `readable` holds at least one complete XUDP frame to drain.
+    ///
+    /// Incomplete leftovers (frame spanning TLS records) must NOT count as
+    /// ready — otherwise `select!` re-arms immediately and busy-loops.
+    fn has_complete_xudp_frame(&self) -> bool {
+        xudp_buffer_has_complete_frame(&self.readable[self.readable_at..])
+    }
+
     async fn poll_fill_readable(&mut self) -> Result<(), VisionTunnelError> {
-        if self.readable_at < self.readable.len() {
+        if self.has_complete_xudp_frame() {
             return Ok(());
         }
+        // Empty or truncated: await another TLS application record.
         self.read_and_open_record().await
     }
 
@@ -340,5 +349,106 @@ impl XudpTunnel {
             .await
             .map_err(VisionTunnelError::Io)?;
         Ok(())
+    }
+}
+
+/// Returns whether `buffer` begins with a complete, decodable XUDP frame.
+///
+/// Used by the client tunnel to distinguish "ready to drain" from "need more
+/// TLS records" when a frame is fragmented across records.
+pub(crate) fn xudp_buffer_has_complete_frame(buffer: &[u8]) -> bool {
+    decode_xudp_packet(buffer).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::xudp_buffer_has_complete_frame;
+    use crate::protocol::vless::{Address, Destination, encode_xudp_packet};
+    use std::net::Ipv4Addr;
+    use std::time::{Duration, Instant};
+
+    fn sample_frame() -> Vec<u8> {
+        let dest = Destination::new(Address::Ipv4(Ipv4Addr::new(127, 0, 0, 1)), 9);
+        let mut wire = Vec::new();
+        encode_xudp_packet(&dest, b"frag-test-payload", true, None, false, &mut wire)
+            .expect("encode");
+        wire
+    }
+
+    #[test]
+    fn complete_frame_is_ready() {
+        let frame = sample_frame();
+        assert!(xudp_buffer_has_complete_frame(&frame));
+    }
+
+    #[test]
+    fn empty_buffer_is_not_ready() {
+        assert!(!xudp_buffer_has_complete_frame(&[]));
+    }
+
+    #[test]
+    fn fragmented_frame_across_chunks_is_not_ready_until_complete() {
+        let frame = sample_frame();
+        assert!(frame.len() > 4, "fixture must be splittable");
+        let split = frame.len() / 2;
+        let first = &frame[..split];
+        let second = &frame[split..];
+        assert!(
+            !xudp_buffer_has_complete_frame(first),
+            "first TLS-record-sized fragment must not look complete"
+        );
+        let mut reassembled = first.to_vec();
+        reassembled.extend_from_slice(second);
+        assert!(xudp_buffer_has_complete_frame(&reassembled));
+    }
+
+    #[test]
+    fn truncated_meta_len_only_is_not_ready() {
+        assert!(!xudp_buffer_has_complete_frame(&[0x00]));
+        assert!(!xudp_buffer_has_complete_frame(&[0x00, 0x0c]));
+    }
+
+    /// Regression: treating truncated leftovers as "ready" would spin the
+    /// `select!` branch without reading. Simulate the poll decision and require
+    /// that incomplete buffers demand a read (CPU progress via I/O wait).
+    #[test]
+    fn incomplete_buffer_requires_read_not_busy_spin() {
+        let frame = sample_frame();
+        let cut = frame.len().saturating_sub(3).max(1);
+        let incomplete = &frame[..cut];
+        assert!(!incomplete.is_empty());
+        assert!(!xudp_buffer_has_complete_frame(incomplete));
+
+        let mut reads_needed = 0_u32;
+        let mut buffer = incomplete.to_vec();
+        let deadline = Instant::now() + Duration::from_millis(50);
+        let mut iterations = 0_u32;
+        while !xudp_buffer_has_complete_frame(&buffer) {
+            iterations += 1;
+            assert!(
+                iterations < 10_000,
+                "decision loop must not busy-spin on truncated XUDP"
+            );
+            if Instant::now() >= deadline {
+                panic!("expected simulated read to complete the frame");
+            }
+            reads_needed += 1;
+            buffer.extend_from_slice(&frame[incomplete.len()..]);
+        }
+        assert_eq!(reads_needed, 1);
+        assert_eq!(iterations, 1);
+        assert!(xudp_buffer_has_complete_frame(&buffer));
+    }
+
+    /// Old bug pattern: leftover bytes ⇒ immediately "ready" even when truncated.
+    #[test]
+    fn leftover_incomplete_bytes_are_not_ready() {
+        let frame = sample_frame();
+        let leftover = &frame[..5];
+        assert!(!leftover.is_empty());
+        assert!(
+            !xudp_buffer_has_complete_frame(leftover),
+            "non-empty truncated leftover must still require another record"
+        );
     }
 }
