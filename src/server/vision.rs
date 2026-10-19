@@ -481,6 +481,45 @@ impl VisionHandler {
         Ok(session_stats(uplink, downlink))
     }
 
+    /// Authorize an XUDP New/Keep destination: canonical routing, DNS, Direct-only.
+    ///
+    /// Keep rewrites MUST call this again; a prior Direct decision must not be
+    /// inherited when the new destination routes to Block/Handoff/NXR.
+    pub(crate) async fn authorize_xudp_destination(
+        &self,
+        user_id: UserId,
+        inbound_tag: &str,
+        dest: &crate::protocol::vless::Destination,
+    ) -> Result<crate::protocol::vless::Destination, VisionSessionError> {
+        let route = self
+            .routing
+            .select_with_dns(
+                user_id,
+                inbound_tag,
+                dest,
+                self.dns_strategy,
+                self.dns_timeout,
+            )
+            .await
+            .map_err(VisionSessionError::Route)?;
+        require_direct_xudp_route(self.outbounds.xudp_route_class(route.decision().outbound()))
+            .map_err(|error| VisionSessionError::Xudp(XudpSessionError::Outbound(error)))?;
+        if let Some(ip) = route.resolved_ips().first().copied() {
+            Ok(match ip {
+                IpAddr::V4(v4) => crate::protocol::vless::Destination::new(
+                    crate::protocol::vless::Address::Ipv4(v4),
+                    dest.port(),
+                ),
+                IpAddr::V6(v6) => crate::protocol::vless::Destination::new(
+                    crate::protocol::vless::Address::Ipv6(v6),
+                    dest.port(),
+                ),
+            })
+        } else {
+            Ok(dest.clone())
+        }
+    }
+
     /// Serves one REALITY-authenticated Vision **XUDP** (Mux) session.
     ///
     /// XUDP frames ride inside Vision padding. Only **Direct** UDP egress is
@@ -553,41 +592,18 @@ impl VisionHandler {
 
         loop {
             for packet in packets.drain(..) {
+                let authorized = if let Some(dest) = packet.destination.as_ref() {
+                    Some(
+                        self.authorize_xudp_destination(user_id, inbound_tag, dest)
+                            .await?,
+                    )
+                } else {
+                    None
+                };
                 if association.is_none() {
-                    let dest = packet.destination.clone().ok_or(VisionSessionError::Xudp(
+                    let bind_dest = authorized.clone().ok_or(VisionSessionError::Xudp(
                         XudpSessionError::MissingNewDestination,
                     ))?;
-                    let route = self
-                        .routing
-                        .select_with_dns(
-                            user_id,
-                            inbound_tag,
-                            &dest,
-                            self.dns_strategy,
-                            self.dns_timeout,
-                        )
-                        .await
-                        .map_err(VisionSessionError::Route)?;
-                    require_direct_xudp_route(
-                        self.outbounds.xudp_route_class(route.decision().outbound()),
-                    )
-                    .map_err(|error| VisionSessionError::Xudp(XudpSessionError::Outbound(error)))?;
-
-                    // Prefer DNS-resolved IPs when the XUDP destination was a domain.
-                    let bind_dest = if let Some(ip) = route.resolved_ips().first().copied() {
-                        match ip {
-                            IpAddr::V4(v4) => crate::protocol::vless::Destination::new(
-                                crate::protocol::vless::Address::Ipv4(v4),
-                                dest.port(),
-                            ),
-                            IpAddr::V6(v6) => crate::protocol::vless::Destination::new(
-                                crate::protocol::vless::Address::Ipv6(v6),
-                                dest.port(),
-                            ),
-                        }
-                    } else {
-                        dest.clone()
-                    };
                     let now = std::time::Instant::now();
                     let assoc =
                         XudpDirectAssociation::open(&bind_dest, packet.global_id, globals, now)
@@ -598,7 +614,7 @@ impl VisionHandler {
                 if let Some(assoc) = association.as_mut() {
                     let now = std::time::Instant::now();
                     assoc
-                        .handle_uplink_packet(&packet, now)
+                        .handle_uplink_packet(&packet, authorized.as_ref(), now)
                         .await
                         .map_err(VisionSessionError::Xudp)?;
                     uplink_bytes = uplink_bytes.saturating_add(packet.payload.len() as u64);
@@ -660,8 +676,21 @@ impl VisionHandler {
                                 .map_err(VisionSessionError::Xudp)?;
                             let now = std::time::Instant::now();
                             for packet in more {
+                                let authorized = if let Some(dest) = packet.destination.as_ref()
+                                {
+                                    Some(
+                                        self.authorize_xudp_destination(
+                                            user_id,
+                                            inbound_tag,
+                                            dest,
+                                        )
+                                        .await?,
+                                    )
+                                } else {
+                                    None
+                                };
                                 assoc
-                                    .handle_uplink_packet(&packet, now)
+                                    .handle_uplink_packet(&packet, authorized.as_ref(), now)
                                     .await
                                     .map_err(VisionSessionError::Xudp)?;
                                 uplink_bytes =
@@ -4520,6 +4549,88 @@ mod tests {
         )
         .expect("test relay policy must compile");
         VisionHandler::new(outbounds, routing, relay, governor)
+    }
+
+    fn handler_with_block_cidr(
+        governor: &ResourceGovernorPolicy,
+        blocked_cidr: &str,
+    ) -> VisionHandler {
+        let barrier = DirectBarrierPolicy {
+            max_concurrent: 8,
+            max_per_second: 8,
+        };
+        let outbounds = OutboundRegistry::new(
+            &std::collections::BTreeMap::new(),
+            &barrier,
+            Duration::from_millis(governor.connect_timeout_ms),
+            crate::transport::FdBudget::new(4_096),
+        );
+        let routing = RoutingTable::compile(
+            &RoutingConfig {
+                default: "direct".to_owned(),
+                strategy: None,
+                rules: Some(vec![crate::config::node::routing::RouteRule {
+                    name: Some("xudp-keep-block".to_owned()),
+                    outbound: "block".to_owned(),
+                    ip: Some(vec![blocked_cidr.to_owned()]),
+                    ..crate::config::node::routing::RouteRule::default()
+                }]),
+                policies: None,
+            },
+            &[UserConfig {
+                id: "33333333-3333-3333-3333-333333333333".to_owned(),
+                short_ids: vec!["0123456789abcdef".to_owned()],
+                label: None,
+                policy: None,
+            }],
+            Arc::new(EmptyAssetMatcher),
+            crate::runtime::ResourceGovernor::new(
+                &crate::runtime::policy::ResourceGovernorPolicy::default(),
+            ),
+        )
+        .expect("test routing must compile");
+        let relay = crate::transport::TcpRelay::new(
+            crate::transport::TcpRelayConfig {
+                buffer_bytes: 32 * 1024,
+                max_pooled_buffers: 8,
+                max_splice_relays: 0,
+                splice: false,
+                pipe_pool: true,
+                max_pooled_pipes: 8,
+            },
+            crate::transport::FdBudget::new(4_096),
+        )
+        .expect("test relay policy must compile");
+        VisionHandler::new(outbounds, routing, relay, governor)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn xudp_keep_rewrite_direct_then_block_fails_closed() {
+        use crate::protocol::vless::{Address, Destination};
+        use crate::server::xudp::XudpOutboundUnsupported;
+
+        let governor = ResourceGovernorPolicy::default();
+        // Block 10.0.0.0/8; default remains Direct.
+        let handler = handler_with_block_cidr(&governor, "10.0.0.0/8");
+        let green = Destination::new(Address::Ipv4(Ipv4Addr::new(127, 0, 0, 1)), 9);
+        let red = Destination::new(Address::Ipv4(Ipv4Addr::new(10, 1, 2, 3)), 9);
+
+        let authorized = handler
+            .authorize_xudp_destination(USER, "public-reality", &green)
+            .await
+            .expect("Direct destination must remain GREEN");
+        assert_eq!(authorized.port(), 9);
+
+        let err = handler
+            .authorize_xudp_destination(USER, "public-reality", &red)
+            .await
+            .expect_err("Keep rewrite to Block must fail closed (RED)");
+        match err {
+            VisionSessionError::Xudp(crate::server::xudp::XudpSessionError::Outbound(
+                XudpOutboundUnsupported::Block,
+            )) => {}
+            other => panic!("expected Block outbound rejection, got {other}"),
+        }
     }
 
     /// Reproduces the abort-authority lifetime question from #195.
