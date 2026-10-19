@@ -478,4 +478,28 @@ mod tests {
         assert_eq!(assoc.downlink_datagrams(), 1);
         assoc.close(&globals, Instant::now());
     }
+
+    #[tokio::test]
+    async fn association_close_then_purge_releases_global_slot() {
+        let echo = UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let dest = socket_addr_to_destination(echo.local_addr().unwrap());
+        let globals = XudpGlobalMap::new();
+        let now = Instant::now();
+        let gid = [7_u8; 8];
+        let assoc = XudpDirectAssociation::open(&dest, Some(gid), &globals, now)
+            .await
+            .unwrap();
+        assert_eq!(globals.len(), 1);
+        // close marks the GlobalID expired; purge drops it (control-EOF / cancel path).
+        assoc.close(&globals, now);
+        globals.purge(now + XUDP_ASSOCIATION_IDLE + Duration::from_secs(1));
+        assert_eq!(globals.len(), 0);
+        let again = XudpDirectAssociation::open(&dest, Some(gid), &globals, now)
+            .await
+            .unwrap();
+        assert_eq!(globals.len(), 1);
+        again.close(&globals, now);
+    }
 }

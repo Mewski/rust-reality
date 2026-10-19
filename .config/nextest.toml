@@ -17,3 +17,8 @@ path = "junit.xml"
 report-name = "rust-reality"
 store-success-output = false
 store-failure-output = true
+
+# Process-level REALITY + openssl cover stacks need more than the default 10s×2.
+[[profile.default.overrides]]
+filter = 'binary(client_socks5_udp_e2e)'
+slow-timeout = { period = "60s", terminate-after = 2 }

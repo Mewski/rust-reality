@@ -38,3 +38,33 @@ as XUDP over one committed REALITY + Vision LINE (Mux command `0x03`).
   association never migrates mid-session.
 - UDP/443: permitted only when the LINE sets `allowUdp443: true` (stock
   `xtls-rprx-vision-udp443` policy). Wire flow remains `xtls-rprx-vision`.
+
+## Qualification (unified-client UDP series)
+
+PR4 adds process-level evidence on top of the unit framing/auth/server Direct
+tests from earlier PRs:
+
+| Evidence | What it proves |
+| --- | --- |
+| SOCKS5 UDP ASSOCIATE E2E | Loopback client → REALITY entry → Direct UDP echo with byte-exact payload |
+| UDP/443 policy | Without `allowUdp443`, UDP/443 fails closed; with it, XUDP may carry 443 |
+| Framing fuzz | `fuzz_decode_xudp_packet` remains in the wire-parser fuzz shard |
+| Route fail-closed | NXR / Handoff / Block remain explicit errors (no silent Direct fallback) |
+
+This is **not** native QUIC transport. QUIC/443 traffic, when permitted, is still
+UDP datagrams inside Vision/XUDP over the existing REALITY LINE.
+
+Cancellation and association teardown: closing the SOCKS5 TCP control connection
+ends the XUDP association; idle associations expire per `XUDP_ASSOCIATION_IDLE`.
+
+## Cross-implementation notes
+
+- **TCP Vision / REALITY** interoperability with unmodified Xray-core (pinned
+  tag) continues to be exercised by Exact-head Native qualification.
+- **UDP via XUDP** against stock Xray as peer is desirable follow-on evidence;
+  this tree first proves our client ASSOCIATE ↔ our server Direct path and
+  framing golden vectors against the pinned `common/xudp` layout. A stock-Xray
+  UDP peer harness may land once the Direct path is on `main`.
+- Constrained-resource behaviour reuses existing association limits
+  (`XUDP_MAX_ASSOCIATIONS`, idle expire) and process FD budgets; association
+  teardown on control EOF is the cancellation path for SOCKS5 UDP ASSOCIATE.
