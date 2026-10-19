@@ -125,7 +125,7 @@ fn which(name: &str) -> Option<PathBuf> {
 
 fn spawn_udp_echo() -> (UdpSocket, u16, thread::JoinHandle<()>) {
     let sock = UdpSocket::bind("127.0.0.1:0").expect("echo bind");
-    sock.set_read_timeout(Some(Duration::from_secs(30)))
+    sock.set_read_timeout(Some(Duration::from_secs(10)))
         .expect("echo timeout");
     let port = sock.local_addr().expect("addr").port();
     let echo = sock.try_clone().expect("clone");
@@ -152,9 +152,9 @@ fn socks5_udp_round_trip(
 ) -> Result<Vec<u8>, String> {
     let mut control =
         TcpStream::connect(("127.0.0.1", socks_port)).map_err(|e| format!("socks connect: {e}"))?;
-    control.set_read_timeout(Some(Duration::from_secs(15))).ok();
+    control.set_read_timeout(Some(Duration::from_secs(10))).ok();
     control
-        .set_write_timeout(Some(Duration::from_secs(15)))
+        .set_write_timeout(Some(Duration::from_secs(10)))
         .ok();
 
     control
@@ -185,7 +185,7 @@ fn socks5_udp_round_trip(
     ));
 
     let udp = UdpSocket::bind("127.0.0.1:0").map_err(|e| format!("udp bind: {e}"))?;
-    udp.set_read_timeout(Some(Duration::from_secs(15)))
+    udp.set_read_timeout(Some(Duration::from_secs(10)))
         .map_err(|e| format!("udp timeout: {e}"))?;
 
     // RSV RSV FRAG ATYP IPv4 DST.ADDR DST.PORT DATA
@@ -270,7 +270,7 @@ fn start_stack(allow_udp_443: bool) -> (DirGuard, u16, u16, KillOnDrop, KillOnDr
         },
         &root.join("cover.log"),
     );
-    wait_port(cover_port, Duration::from_secs(10));
+    wait_port(cover_port, Duration::from_secs(30));
 
     let (private_key, public_key) = generate_x25519();
     let user_id = generate("uuid");
@@ -349,7 +349,7 @@ fn start_stack(allow_udp_443: bool) -> (DirGuard, u16, u16, KillOnDrop, KillOnDr
         },
         &root.join("entry.log"),
     );
-    wait_port(entry_port, Duration::from_secs(15));
+    wait_port(entry_port, Duration::from_secs(20));
 
     let client = spawn_logged(
         "client",
@@ -360,7 +360,7 @@ fn start_stack(allow_udp_443: bool) -> (DirGuard, u16, u16, KillOnDrop, KillOnDr
         },
         &root.join("client.log"),
     );
-    wait_port(socks_port, Duration::from_secs(15));
+    wait_port(socks_port, Duration::from_secs(20));
 
     (guard, socks_port, entry_port, cover, entry, client)
 }
