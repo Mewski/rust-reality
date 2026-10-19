@@ -64,6 +64,10 @@ pub struct LineConfig {
     pub short_id: String,
     /// Server-accepted SNI / serverName.
     pub server_name: String,
+    /// When true, UDP/443 is permitted under XUDP (stock `xtls-rprx-vision-udp443` policy).
+    /// Wire Addons still carry `xtls-rprx-vision`. Default false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_udp_443: bool,
 }
 
 /// A named set of LINE tags used for sticky + hedge selection.

@@ -1,14 +1,16 @@
-//! A bounded RFC 1928 wire-codec subset for a future SOCKS5 inbound.
+//! A bounded RFC 1928 wire-codec subset for the client SOCKS5 inbound.
 //!
-//! This module handles only the no-authentication method negotiation and TCP
-//! `CONNECT` requests. It parses IPv4, IPv6, and non-empty domain destinations,
-//! returns the exact request-header length, and borrows any bytes after a
-//! complete header as payload. A domain is copied into the canonical VLESS
-//! [`Destination`] only after its length and the shared VLESS domain-byte
+//! This module handles the no-authentication method negotiation, TCP `CONNECT`,
+//! and UDP `ASSOCIATE` requests, plus the SOCKS5 UDP datagram header used after
+//! a successful associate. It parses IPv4, IPv6, and non-empty domain
+//! destinations, returns the exact request-header length, and borrows any bytes
+//! after a complete header as payload. A domain is copied into the canonical
+//! VLESS [`Destination`] only after its length and the shared VLESS domain-byte
 //! grammar have been checked; its wire length is at most 255 bytes.
 //!
-//! No listener, socket, DNS lookup, bind operation, authentication subprotocol,
-//! UDP, `BIND`, `CONNECT` reply, or runtime policy is part of this codec.
+//! No listener, socket, DNS lookup, authentication subprotocol, `BIND`, or
+//! runtime routing policy is part of this codec. Fragmented UDP (`FRAG != 0`)
+//! is rejected.
 
 use std::{
     error::Error,
@@ -51,6 +53,7 @@ pub const MAX_CONNECT_REQUEST_LEN: usize = 4 + 1 + u8::MAX as usize + 2;
 const METHOD_NO_AUTHENTICATION: u8 = 0x00;
 const METHOD_NO_ACCEPTABLE_METHODS: u8 = 0xff;
 const COMMAND_CONNECT: u8 = 0x01;
+const COMMAND_UDP_ASSOCIATE: u8 = 0x03;
 const ADDRESS_IPV4: u8 = 0x01;
 const ADDRESS_DOMAIN: u8 = 0x03;
 const ADDRESS_IPV6: u8 = 0x04;
@@ -121,6 +124,58 @@ impl<'a> ConnectRequest<'a> {
     }
 }
 
+/// A parsed UDP ASSOCIATE request (RFC 1928 CMD=0x03).
+///
+/// The destination is the address the client expects to send from; many clients
+/// use `0.0.0.0:0` / `[::]:0`. Port zero is allowed here (unlike CONNECT).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UdpAssociateRequest {
+    destination: Destination,
+    consumed: usize,
+}
+
+impl UdpAssociateRequest {
+    /// Client-reported expected source (often unspecified).
+    pub const fn destination(&self) -> &Destination {
+        &self.destination
+    }
+
+    /// Bytes consumed by the complete ASSOCIATE header.
+    pub const fn consumed(&self) -> usize {
+        self.consumed
+    }
+}
+
+/// One SOCKS5 UDP request/response datagram header plus payload (RFC 1928 §7).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UdpDatagram<'a> {
+    destination: Destination,
+    payload: &'a [u8],
+    consumed: usize,
+}
+
+impl<'a> UdpDatagram<'a> {
+    /// Destination carried in the UDP header.
+    pub const fn destination(&self) -> &Destination {
+        &self.destination
+    }
+
+    /// Application payload after the SOCKS5 UDP header.
+    pub const fn payload(&self) -> &'a [u8] {
+        self.payload
+    }
+
+    /// Total header length (RSV+FRAG+ATYP+ADDR+PORT).
+    pub const fn consumed(&self) -> usize {
+        self.consumed
+    }
+
+    /// Splits into owned destination and borrowed payload.
+    pub fn into_parts(self) -> (Destination, &'a [u8]) {
+        (self.destination, self.payload)
+    }
+}
+
 /// An error produced while parsing the supported SOCKS5 request subset.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DecodeError {
@@ -139,7 +194,7 @@ pub enum DecodeError {
     InvalidMethodCount,
     /// The method offer did not include the supported no-auth method.
     UnsupportedMethod,
-    /// The request used a command other than TCP CONNECT.
+    /// The request used a command other than TCP CONNECT or UDP ASSOCIATE.
     UnsupportedCommand(u8),
     /// The reserved request field was not zero.
     InvalidReservedField(u8),
@@ -151,6 +206,8 @@ pub enum DecodeError {
     ZeroPort,
     /// A domain contains bytes outside the canonical VLESS domain grammar.
     InvalidDomainName,
+    /// SOCKS5 UDP datagram used a non-zero FRAG field (fragmentation unsupported).
+    FragmentedUdp(u8),
 }
 
 impl fmt::Display for DecodeError {
@@ -193,6 +250,12 @@ impl fmt::Display for DecodeError {
                 formatter.write_str("SOCKS5 TCP CONNECT destination port must be nonzero")
             }
             Self::InvalidDomainName => formatter.write_str("SOCKS5 domain destination is invalid"),
+            Self::FragmentedUdp(frag) => {
+                write!(
+                    formatter,
+                    "SOCKS5 UDP fragmentation is unsupported (FRAG={frag})"
+                )
+            }
         }
     }
 }
@@ -363,6 +426,189 @@ pub fn encode_connect_request(
     Ok(required)
 }
 
+/// Parses one RFC 1928 UDP ASSOCIATE request (`CMD=0x03`).
+///
+/// Address and port may be unspecified (`0.0.0.0:0`). Port zero is accepted.
+pub fn decode_udp_associate_request(input: &[u8]) -> Result<UdpAssociateRequest, DecodeError> {
+    let mut cursor = Cursor::new(input);
+    let version = cursor.read_u8("version")?;
+    if version != VERSION {
+        return Err(DecodeError::InvalidVersion(version));
+    }
+
+    let command = cursor.read_u8("command")?;
+    if command != COMMAND_UDP_ASSOCIATE {
+        return Err(DecodeError::UnsupportedCommand(command));
+    }
+
+    let reserved = cursor.read_u8("reserved field")?;
+    if reserved != 0 {
+        return Err(DecodeError::InvalidReservedField(reserved));
+    }
+
+    let address_type = cursor.read_u8("address type")?;
+    let address = match address_type {
+        ADDRESS_IPV4 => Address::Ipv4(Ipv4Addr::from(cursor.read_array::<4>("IPv4 address")?)),
+        ADDRESS_DOMAIN => decode_domain(&mut cursor)?,
+        ADDRESS_IPV6 => Address::Ipv6(Ipv6Addr::from(cursor.read_array::<16>("IPv6 address")?)),
+        unsupported => return Err(DecodeError::UnsupportedAddressType(unsupported)),
+    };
+    let port = cursor.read_u16("destination port")?;
+    let destination = Destination::new(address, port);
+    if let Address::Domain(domain) = destination.address()
+        && !is_valid_domain_name(domain.as_bytes())
+    {
+        return Err(DecodeError::InvalidDomainName);
+    }
+
+    Ok(UdpAssociateRequest {
+        destination,
+        consumed: cursor.position,
+    })
+}
+
+/// Encodes a UDP ASSOCIATE request header.
+pub fn encode_udp_associate_request(
+    destination: &Destination,
+    output: &mut [u8],
+) -> Result<usize, EncodeError> {
+    if let Address::Domain(domain) = destination.address()
+        && (domain.is_empty()
+            || domain.len() > usize::from(u8::MAX)
+            || !is_valid_domain_name(domain.as_bytes()))
+    {
+        return Err(EncodeError::InvalidDomainName);
+    }
+    let required = connect_request_len(destination);
+    ensure_capacity(output, required)?;
+
+    output[0] = VERSION;
+    output[1] = COMMAND_UDP_ASSOCIATE;
+    output[2] = 0;
+    match destination.address() {
+        Address::Ipv4(address) => {
+            output[3] = ADDRESS_IPV4;
+            output[4..8].copy_from_slice(&address.octets());
+            output[8..10].copy_from_slice(&destination.port().to_be_bytes());
+        }
+        Address::Domain(domain) => {
+            let domain_bytes = domain.as_bytes();
+            output[3] = ADDRESS_DOMAIN;
+            output[4] = domain_bytes.len() as u8;
+            output[5..5 + domain_bytes.len()].copy_from_slice(domain_bytes);
+            let port_start = 5 + domain_bytes.len();
+            output[port_start..port_start + 2].copy_from_slice(&destination.port().to_be_bytes());
+        }
+        Address::Ipv6(address) => {
+            output[3] = ADDRESS_IPV6;
+            output[4..20].copy_from_slice(&address.octets());
+            output[20..22].copy_from_slice(&destination.port().to_be_bytes());
+        }
+    }
+    Ok(required)
+}
+
+/// Maximum SOCKS5 UDP header length (RSV+FRAG+ATYP+255-domain+PORT).
+pub const MAX_UDP_HEADER_LEN: usize = 2 + 1 + 1 + 1 + u8::MAX as usize + 2;
+
+/// Parses one SOCKS5 UDP datagram (RFC 1928 §7). Rejects `FRAG != 0`.
+pub fn decode_udp_datagram(input: &[u8]) -> Result<UdpDatagram<'_>, DecodeError> {
+    let mut cursor = Cursor::new(input);
+    let _rsv = cursor.read_u16("UDP reserved")?;
+    let frag = cursor.read_u8("UDP fragment")?;
+    if frag != 0 {
+        return Err(DecodeError::FragmentedUdp(frag));
+    }
+    let address_type = cursor.read_u8("address type")?;
+    let address = match address_type {
+        ADDRESS_IPV4 => Address::Ipv4(Ipv4Addr::from(cursor.read_array::<4>("IPv4 address")?)),
+        ADDRESS_DOMAIN => decode_domain(&mut cursor)?,
+        ADDRESS_IPV6 => Address::Ipv6(Ipv6Addr::from(cursor.read_array::<16>("IPv6 address")?)),
+        unsupported => return Err(DecodeError::UnsupportedAddressType(unsupported)),
+    };
+    let port = cursor.read_u16("destination port")?;
+    if port == 0 {
+        return Err(DecodeError::ZeroPort);
+    }
+    let destination = Destination::new(address, port);
+    if let Address::Domain(domain) = destination.address()
+        && !is_valid_domain_name(domain.as_bytes())
+    {
+        return Err(DecodeError::InvalidDomainName);
+    }
+    let consumed = cursor.position;
+    Ok(UdpDatagram {
+        destination,
+        payload: cursor.remaining_slice(),
+        consumed,
+    })
+}
+
+/// Encodes a SOCKS5 UDP datagram header followed by `payload` into `output`.
+pub fn encode_udp_datagram(
+    destination: &Destination,
+    payload: &[u8],
+    output: &mut Vec<u8>,
+) -> Result<(), EncodeError> {
+    validate_destination(destination).map_err(map_validation_to_encode)?;
+    let header_len = match destination.address() {
+        Address::Ipv4(_) => 2 + 1 + 1 + 4 + 2,
+        Address::Ipv6(_) => 2 + 1 + 1 + 16 + 2,
+        Address::Domain(domain) => 2 + 1 + 1 + 1 + domain.len() + 2,
+    };
+    output.clear();
+    output.reserve(header_len + payload.len());
+    output.extend_from_slice(&[0, 0, 0]); // RSV RSV FRAG
+    match destination.address() {
+        Address::Ipv4(address) => {
+            output.push(ADDRESS_IPV4);
+            output.extend_from_slice(&address.octets());
+        }
+        Address::Domain(domain) => {
+            output.push(ADDRESS_DOMAIN);
+            output.push(domain.len() as u8);
+            output.extend_from_slice(domain.as_bytes());
+        }
+        Address::Ipv6(address) => {
+            output.push(ADDRESS_IPV6);
+            output.extend_from_slice(&address.octets());
+        }
+    }
+    output.extend_from_slice(&destination.port().to_be_bytes());
+    output.extend_from_slice(payload);
+    Ok(())
+}
+
+/// Encodes a SOCKS5 command reply (CONNECT or UDP ASSOCIATE) with an IPv4/IPv6 bind address.
+pub fn encode_command_reply(
+    rep: u8,
+    bound: &std::net::SocketAddr,
+    output: &mut [u8],
+) -> Result<usize, EncodeError> {
+    match bound {
+        std::net::SocketAddr::V4(v4) => {
+            ensure_capacity(output, 10)?;
+            output[0] = VERSION;
+            output[1] = rep;
+            output[2] = 0;
+            output[3] = ADDRESS_IPV4;
+            output[4..8].copy_from_slice(&v4.ip().octets());
+            output[8..10].copy_from_slice(&v4.port().to_be_bytes());
+            Ok(10)
+        }
+        std::net::SocketAddr::V6(v6) => {
+            ensure_capacity(output, 22)?;
+            output[0] = VERSION;
+            output[1] = rep;
+            output[2] = 0;
+            output[3] = ADDRESS_IPV6;
+            output[4..20].copy_from_slice(&v6.ip().octets());
+            output[20..22].copy_from_slice(&v6.port().to_be_bytes());
+            Ok(22)
+        }
+    }
+}
+
 fn connect_request_len(destination: &Destination) -> usize {
     match destination.address() {
         Address::Ipv4(_) => 4 + 4 + 2,
@@ -460,8 +706,9 @@ mod tests {
 
     use super::{
         ConnectRequest, DecodeError, EncodeError, MAX_CONNECT_REQUEST_LEN, MethodResponse, VERSION,
-        decode_connect_request, decode_method_request, encode_connect_request,
-        encode_method_response,
+        decode_connect_request, decode_method_request, decode_udp_associate_request,
+        decode_udp_datagram, encode_command_reply, encode_connect_request, encode_method_response,
+        encode_udp_associate_request, encode_udp_datagram,
     };
     use crate::protocol::vless::{Address, Destination};
 
@@ -767,6 +1014,46 @@ mod tests {
             Destination::new(Address::Ipv4(Ipv4Addr::LOCALHOST), 80)
         );
         assert_eq!(payload, &[0xde, 0xad]);
+    }
+
+    #[test]
+    fn udp_associate_round_trips_unspecified_ipv4() {
+        let dest = Destination::new(Address::Ipv4(Ipv4Addr::UNSPECIFIED), 0);
+        let mut buf = [0_u8; MAX_CONNECT_REQUEST_LEN];
+        let n = encode_udp_associate_request(&dest, &mut buf).expect("encode");
+        let decoded = decode_udp_associate_request(&buf[..n]).expect("decode");
+        assert_eq!(decoded.destination(), &dest);
+        assert_eq!(decoded.consumed(), n);
+    }
+
+    #[test]
+    fn udp_datagram_round_trips_payload() {
+        let dest = Destination::new(Address::Ipv4(Ipv4Addr::new(1, 2, 3, 4)), 443);
+        let mut out = Vec::new();
+        encode_udp_datagram(&dest, b"hello", &mut out).expect("encode");
+        let decoded = decode_udp_datagram(&out).expect("decode");
+        assert_eq!(decoded.destination(), &dest);
+        assert_eq!(decoded.payload(), b"hello");
+    }
+
+    #[test]
+    fn udp_datagram_rejects_fragment() {
+        let mut wire = vec![0, 0, 1, 1, 127, 0, 0, 1, 0, 53, b'x'];
+        assert_eq!(
+            decode_udp_datagram(&wire),
+            Err(DecodeError::FragmentedUdp(1))
+        );
+        wire[2] = 0;
+        assert!(decode_udp_datagram(&wire).is_ok());
+    }
+
+    #[test]
+    fn encode_command_reply_ipv4_shape() {
+        let bound: std::net::SocketAddr = "127.0.0.1:1080".parse().unwrap();
+        let mut out = [0_u8; 22];
+        let n = encode_command_reply(0, &bound, &mut out).unwrap();
+        assert_eq!(n, 10);
+        assert_eq!(&out[..10], &[5, 0, 0, 1, 127, 0, 0, 1, 4, 56]);
     }
 
     fn encode(destination: &Destination) -> Vec<u8> {
