@@ -48,8 +48,11 @@ Xray-compatible client
   is identified, that direction switches to a raw relay (Linux `splice`
   preferred) with the boundary invariants described in
   [architecture.md](architecture.md). Plain VLESS, TLS-only VLESS,
-  WebSocket, QUIC, UDP proxying, and non-Vision flows are not supported on
-  the public inbound.
+  WebSocket, QUIC, and non-Vision flows are not supported on the public
+  inbound. UDP destinations are carried through **XUDP** (VLESS Mux
+  `0x03` / `v1.mux.cool:666`) over the Vision stream for **Direct** routes
+  only; see [development/xudp.md](development/xudp.md). NXR/Handoff UDP
+  is not supported and fails closed.
 
 The public stack is wire-compatible with Xray-core clients; the compatibility
 gate is described in [benchmarks.md](benchmarks.md).
