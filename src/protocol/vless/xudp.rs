@@ -30,9 +30,12 @@ pub const XUDP_MUX_PORT: u16 = 666;
 /// Maximum Mux metadata length accepted by stock Xray (`common/mux/frame.go`).
 pub const XUDP_MAX_META_LEN: usize = 512;
 
-/// Soft upper bound matching Xray `buf.Size` interaction (`length + 666 > buf.Size` skip).
-/// We reject oversized payloads rather than silently dropping them.
-pub const XUDP_MAX_PAYLOAD_LEN: usize = 16 * 1024;
+/// Stock Xray `common/buf.Size` (pinned v26.7.28 / current Xray-core releases).
+pub const XRAY_BUF_SIZE: usize = 8 * 1024;
+
+/// Soft upper bound matching Xray `PacketWriter` (`length + 666 > buf.Size` → skip).
+/// We **reject** oversized payloads rather than silently dropping them.
+pub const XUDP_MAX_PAYLOAD_LEN: usize = XRAY_BUF_SIZE - 666; // 7526
 
 const ADDRESS_TYPE_IPV4: u8 = 0x01;
 const ADDRESS_TYPE_DOMAIN: u8 = 0x02;
@@ -280,41 +283,43 @@ pub fn encode_xudp_packet(
             length: payload.len(),
         });
     }
-
-    let meta_start = output.len();
-    output.extend_from_slice(&[0, 0]); // metaLen placeholder
-    output.extend_from_slice(&0_u16.to_be_bytes()); // session id 0
-
-    if new_association {
-        output.push(XudpSessionStatus::New as u8);
-        output.push(XudpOption::DATA.as_byte());
-        output.push(XudpNetwork::Udp as u8);
-        write_port_then_address(output, destination)?;
-        if let Some(id) = global_id {
-            output.extend_from_slice(&id);
-        }
-    } else {
-        output.push(XudpSessionStatus::Keep as u8);
-        output.push(XudpOption::DATA.as_byte());
-        if rewrite_destination {
-            output.push(XudpNetwork::Udp as u8);
-            write_port_then_address(output, destination)?;
-        }
-    }
-
-    let meta_len = output.len() - meta_start - 2;
-    if meta_len > XUDP_MAX_META_LEN {
-        return Err(XudpCodecError::MetaTooLarge { length: meta_len });
-    }
-    let meta_len_u16 = u16::try_from(meta_len).expect("meta_len fits u16 after bound check");
-    output[meta_start..meta_start + 2].copy_from_slice(&meta_len_u16.to_be_bytes());
-
     let payload_len =
         u16::try_from(payload.len()).map_err(|_| XudpCodecError::PayloadTooLarge {
             length: payload.len(),
         })?;
-    output.extend_from_slice(&payload_len.to_be_bytes());
-    output.extend_from_slice(payload);
+
+    // Failure-atomic: stage into a scratch buffer and append only on success so
+    // a MetaTooLarge / address error cannot leave a partial frame in `output`.
+    let mut staged = Vec::with_capacity(2 + XUDP_MAX_META_LEN + 2 + payload.len());
+    staged.extend_from_slice(&[0, 0]); // metaLen placeholder
+    staged.extend_from_slice(&0_u16.to_be_bytes()); // session id 0
+
+    if new_association {
+        staged.push(XudpSessionStatus::New as u8);
+        staged.push(XudpOption::DATA.as_byte());
+        staged.push(XudpNetwork::Udp as u8);
+        write_port_then_address(&mut staged, destination)?;
+        if let Some(id) = global_id {
+            staged.extend_from_slice(&id);
+        }
+    } else {
+        staged.push(XudpSessionStatus::Keep as u8);
+        staged.push(XudpOption::DATA.as_byte());
+        if rewrite_destination {
+            staged.push(XudpNetwork::Udp as u8);
+            write_port_then_address(&mut staged, destination)?;
+        }
+    }
+
+    let meta_len = staged.len() - 2;
+    if meta_len > XUDP_MAX_META_LEN {
+        return Err(XudpCodecError::MetaTooLarge { length: meta_len });
+    }
+    let meta_len_u16 = u16::try_from(meta_len).expect("meta_len fits u16 after bound check");
+    staged[0..2].copy_from_slice(&meta_len_u16.to_be_bytes());
+    staged.extend_from_slice(&payload_len.to_be_bytes());
+    staged.extend_from_slice(payload);
+    output.extend_from_slice(&staged);
     Ok(())
 }
 
@@ -699,5 +704,37 @@ mod tests {
         assert_eq!(VISION_FLOW_UDP443, "xtls-rprx-vision-udp443");
         assert_eq!(VISION_FLOW.len(), 16);
         assert!(VISION_FLOW_UDP443.starts_with(VISION_FLOW));
+        assert_eq!(XRAY_BUF_SIZE, 8 * 1024);
+        assert_eq!(XUDP_MAX_PAYLOAD_LEN, XRAY_BUF_SIZE - 666);
+        assert_eq!(XUDP_MAX_PAYLOAD_LEN, 7526);
+    }
+
+    #[test]
+    fn rejects_payload_above_stock_buf_size_gate() {
+        let oversized = vec![0_u8; XUDP_MAX_PAYLOAD_LEN + 1];
+        let mut out = Vec::new();
+        assert_eq!(
+            encode_xudp_packet(&dest_dns(), &oversized, true, None, false, &mut out),
+            Err(XudpCodecError::PayloadTooLarge {
+                length: XUDP_MAX_PAYLOAD_LEN + 1
+            })
+        );
+        assert!(out.is_empty(), "failed encode must not mutate output");
+    }
+
+    #[test]
+    fn encode_is_failure_atomic_on_address_error() {
+        // Domain longer than 255 fails inside staging; output must stay untouched.
+        let domain = "a".repeat(256);
+        let dest = Destination::new(Address::Domain(domain), 53);
+        let mut out = vec![0xAA, 0xBB];
+        let err = encode_xudp_packet(&dest, b"x", true, Some([1; 8]), false, &mut out)
+            .expect_err("oversized domain must fail");
+        assert!(matches!(err, XudpCodecError::DomainTooLong { .. }));
+        assert_eq!(
+            out,
+            vec![0xAA, 0xBB],
+            "failed encode must be failure-atomic"
+        );
     }
 }
