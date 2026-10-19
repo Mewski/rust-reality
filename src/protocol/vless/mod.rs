@@ -48,7 +48,7 @@ pub use vision::{
 #[doc(hidden)]
 pub use xudp::fuzz_decode_xudp_packet;
 pub use xudp::{
-    VISION_FLOW_UDP443, XUDP_MAX_META_LEN, XUDP_MAX_PAYLOAD_LEN, XUDP_MUX_HOST, XUDP_MUX_PORT,
+    VISION_FLOW_UDP443, XRAY_BUF_SIZE, XUDP_MAX_META_LEN, XUDP_MAX_PAYLOAD_LEN, XUDP_MUX_HOST, XUDP_MUX_PORT,
     XudpCodecError, XudpGlobalId, XudpNetwork, XudpOption, XudpPacket, XudpSessionStatus,
     config_flow_allows_udp_443, decode_xudp_packet, encode_xudp_packet, frame_looks_like_xudp,
     is_xudp_mux_command, meta_body_is_xudp, vision_udp_command_allows_port,
