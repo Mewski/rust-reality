@@ -62,7 +62,7 @@ pub struct LineGroup {
 }
 
 impl LineGroup {
-    /// Builds a group from compiled LINEs (1..=[`MAX_LINES_PER_GROUP`]).
+    /// Builds a group from compiled LINEs (1..=8).
     pub fn new(
         name: impl Into<String>,
         lines: Vec<Arc<Line>>,
