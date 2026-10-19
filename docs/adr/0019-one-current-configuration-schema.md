@@ -62,8 +62,9 @@ not. The operator-facing migration procedure lives in the release notes of the
 release that breaks the format, per §9 — never in the binary.
 
 This rule is scoped to *configuration*. It grants nothing with respect to the
-VLESS wire protocol, REALITY, Vision, stock Xray client interoperability, or the
-NXR and Handoff wire contracts, all of which remain strict.
+VLESS wire protocol, REALITY, Vision, **unmodified stock Xray client →
+rust-reality server** ingress interoperability (ADR 0059), or the NXR and
+Handoff wire contracts, all of which remain strict.
 
 ### The canonical format is strict UTF-8 JSON
 

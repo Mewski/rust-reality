@@ -40,10 +40,19 @@ pub struct XudpTunnel {
     last_destination: Option<Destination>,
     association_opened: bool,
     allow_udp_443: bool,
+    /// Stock Xray VLESS inbound buffers the response until the first downlink
+    /// write (`SetFlushNext`). XUDP New → UDP echo → mux write flushes it, so
+    /// we defer `await_response` until after the first uplink XUDP frame.
+    response_pending: bool,
 }
 
 impl XudpTunnel {
-    /// Sends the Vision Mux/XUDP preamble and waits for the VLESS response.
+    /// Sends the Vision Mux/XUDP preamble.
+    ///
+    /// The VLESS response is read on the first uplink XUDP frame inside
+    /// [`Self::relay_socks5_udp`]. Stock Xray inbound only flushes the buffered
+    /// response on the first downlink write (`SetFlushNext`); sending XUDP New
+    /// first matches stock Xray client parallelism and avoids ASSOCIATE deadlock.
     pub async fn connect(
         mut stream: TcpStream,
         mut session: ClientSession,
@@ -77,7 +86,7 @@ impl XudpTunnel {
             .map_err(VisionTunnelError::Io)?;
         stream.flush().await.map_err(VisionTunnelError::Io)?;
 
-        let mut tunnel = Self {
+        Ok(Self {
             stream,
             session,
             encoder,
@@ -89,9 +98,8 @@ impl XudpTunnel {
             last_destination: None,
             association_opened: false,
             allow_udp_443,
-        };
-        tunnel.await_response().await?;
-        Ok(tunnel)
+            response_pending: true,
+        })
     }
 
     /// Relays SOCKS5 UDP datagrams on `udp` while `control` stays open.
@@ -127,8 +135,15 @@ impl XudpTunnel {
                     }
                     self.send_xudp(&destination, datagram.payload(), &mut xudp_out)
                         .await?;
+                    if self.response_pending {
+                        // First uplink XUDP lets stock Xray flush the buffered
+                        // VLESS response (inbound SetFlushNext). Match stock
+                        // Xray client parallelism: send before waiting.
+                        self.await_response().await?;
+                        self.response_pending = false;
+                    }
                 }
-                ready = self.poll_fill_readable() => {
+                ready = self.poll_fill_readable(), if !self.response_pending => {
                     ready?;
                     while let Some(packet) = self.take_xudp_packet()? {
                         let Some(destination) = packet.destination.clone().or_else(|| {

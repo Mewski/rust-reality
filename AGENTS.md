@@ -92,12 +92,14 @@ modifying anything:
 ## 3. Project mission
 
 rust-reality is a Linux-focused, single-binary VLESS + REALITY + Vision proxy
-server with an optional NXR/Handoff line-to-landing topology. The current
-product contract — Xray-core-compatible public VLESS + REALITY + Vision data
-path, REALITY fallback byte-exactness, authentication, replay safety, bounded
-resources, and measured performance — is the only contract. Product scope is
-documented in `README.md` and the threat model (`docs/en/threat-model.md`);
-the operator-facing references live under `docs/en/` and `docs/zh-CN/`.
+with a unified client role and an optional NXR/Handoff line-to-landing topology.
+The current product contract — public VLESS + REALITY + Vision (+ XUDP) data
+path compatible with **unmodified stock Xray-core clients** as ingress peers,
+REALITY fallback byte-exactness, authentication, replay safety, bounded
+resources, and measured performance — is the only contract. See §6 for the
+directional interop boundary. Product scope is documented in `README.md` and
+the threat model (`docs/en/threat-model.md`); the operator-facing references
+live under `docs/en/` and `docs/zh-CN/`.
 
 ## 4. Forward-only project
 
@@ -130,8 +132,25 @@ equivalent CLI workflows, or migration pipelines embedded in production code.
 External interoperability required for **current** operation is mandatory and
 MUST stay correct: the VLESS wire protocol, REALITY interoperability, TLS
 behavior of real peers, supported operating-system interfaces, and currently
-supported external ecosystem formats. Current Xray interoperability MUST be
-preserved in every optimization.
+supported external ecosystem formats.
+
+### Directional stock Xray interop (binding)
+
+| Direction | Requirement |
+| --- | --- |
+| rust-reality Client → rust-reality Server | REQUIRED: fully functional, secure, reliable, performance-qualified (including UDP/XUDP and UDP/443 policy). |
+| Unmodified stock Xray-core Client → rust-reality Server | REQUIRED: preserve supported VLESS + REALITY + Vision + XUDP ingress. MUST NOT regress under optimization. |
+| rust-reality Client → stock Xray-core Server | **NOT REQUIRED.** No compatibility guarantee now or in the future. MUST NOT be a CI / Native / Frozen / release acceptance gate. Historical probes MAY remain as `#[ignore]` evidence only. |
+
+Future native extensions MUST use explicit authenticated capability boundaries:
+they MUST NOT silently change Xray-compatible ingress behavior and MUST NOT
+introduce an insecure downgrade path. Do not invent a second protocol, a
+duplicate config schema, or a general “compatibility framework” for the
+non-required direction (§8).
+
+Performance comparisons MAY measure rust↔rust against stock Xray↔Xray where
+appropriate; they MUST NOT treat rust-reality Client → Xray Server as a
+release requirement.
 
 The following never justify compatibility machinery: old rust-reality JSON
 keys, old defaults, removed CLI flags, historical serialization choices,
