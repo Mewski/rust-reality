@@ -59,32 +59,34 @@ ends the XUDP association; idle associations expire per `XUDP_ASSOCIATION_IDLE`.
 
 ## Cross-implementation notes
 
-- **TCP Vision / REALITY** interoperability with unmodified Xray-core continues
-  to be exercised by Exact-head Native qualification.
-- **UDP via XUDP — proven:** unmodified stock Xray SOCKS client (`udp: true`,
-  flow `xtls-rprx-vision-udp443`) → rust-reality entry Direct UDP echo
-  (`tests/xudp_stock_xray_interop.rs`, requires `XRAY_BIN`).
-  Local loopback single-datagram RTT samples (warm path) reported median
-  ≈8 ms in one sandbox run — setup/teardown wall clock is separate and
-  **not** a throughput claim.
-- **UDP via XUDP — proven:** rust-reality unified client → stock Xray
-  VLESS+REALITY server (Vision flow) Direct UDP echo (same interop test file).
-  Requires: (1) Go-parseable ClientHello (`status_request` OCSP empty lists and
-  `psk_key_exchange_modes` `0x002d`; a prior `0x2d00` typo plus a 2-byte status
-  body made stock Xray report `failed to read client hello`); (2) stock Xray
-  `freedom.finalRules: [{action: allow}]` so loopback/private destinations are
-  not blackholed by the default VLESS private-IP block; (3) client defers the
-  VLESS response read until after the first uplink XUDP frame (stock inbound
-  `SetFlushNext` only flushes on first downlink write).
-- **QUIC/HTTP3 UDP/443:** not native QUIC transport on the REALITY LINE. XUDP
-  carries UDP datagrams; `allowUdp443` gates destination port 443 (stock
-  vision-udp443 policy). The interop probe sends a QUIC-shaped payload to
-  `127.0.0.1:443` via SOCKS5 UDP ASSOCIATE only (no TCP CONNECT). Binding
-  `:443` needs privileges many sandboxes lack — then the probe **skips**
-  (fail-closed, not a green pass). Native/privileged runners should bind and
-  exercise the path. Full browser-grade HTTP/3 over this UDP path is out of
-  scope for this gate; the proof is XUDP delivery to UDP/443 without TCP
-  fallback.
+Directional contract (AGENTS.md §6, ADR 0059):
+
+| Direction | Gate status |
+| --- | --- |
+| rust-reality Client ↔ rust-reality Server | **Required** (TCP Vision + UDP/XUDP, including `allowUdp443`) |
+| Unmodified stock Xray Client → rust-reality Server | **Required** ingress; Exact-head Native exercises it |
+| rust-reality Client → stock Xray Server | **Not required**; no guarantee; not a CI/Native/Frozen/release gate |
+
+- **TCP Vision / REALITY** with unmodified Xray-core **clients** continues under
+  Exact-head Native qualification.
+- **UDP via XUDP — mandatory proven:** unmodified stock Xray SOCKS client
+  (`udp: true`, flow `xtls-rprx-vision-udp443`) → rust-reality entry Direct UDP
+  echo (`tests/xudp_stock_xray_interop.rs`, requires `XRAY_BIN`). Local loopback
+  single-datagram RTT samples (warm path) reported median ≈7–8 ms in one sandbox
+  run — setup/teardown wall clock is separate and **not** a throughput claim.
+- **UDP via XUDP — historical / ignored (not a release blocker):** rust-reality
+  unified client → stock Xray VLESS+REALITY server. Past failure evidence
+  (Go ClientHello parse, inbound `SetFlushNext` response ordering, freedom
+  private-IP default block) is retained for archaeology; the test stays
+  `#[ignore]` and MUST NOT block merge or release.
+- **QUIC/HTTP3 UDP/443 (rust↔rust):** not native QUIC transport on the REALITY
+  LINE. XUDP carries UDP datagrams; `allowUdp443` gates destination port 443
+  (stock vision-udp443 policy). Mandatory verification uses SOCKS5 UDP
+  ASSOCIATE only (no TCP CONNECT). Binding `127.0.0.1:443` needs privileges —
+  unprivileged sandboxes **skip** (fail-closed, not a green pass);
+  Native/privileged runners SHOULD bind and exercise. Full browser-grade HTTP/3
+  is out of scope for this gate; the proof is XUDP delivery to UDP/443 without
+  TCP fallback.
 - GlobalID affinity is **process-wide** (`process_xudp_global_map`). Payload
   capped at stock `buf.Size - 666` (7526); encode is failure-atomic.
   Association limits: `XUDP_MAX_ASSOCIATIONS`, idle expire, FD budgets;

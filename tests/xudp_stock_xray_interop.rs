@@ -3,12 +3,13 @@
 //! When `XRAY_BIN` is unset the tests return early (not a pass claim). Native
 //! qualification exports `XRAY_BIN` to an unmodified stock binary.
 //!
-//! Proven when green:
+//! Proven when green (mandatory gates — AGENTS.md §6 / ADR 0059):
 //! 1. rust-reality entry ← stock Xray SOCKS(udp) client (flow vision-udp443)
-//! 2. stock Xray VLESS+REALITY server ← rust-reality client SOCKS5 UDP ASSOCIATE
-//! 3. QUIC-shaped datagram to UDP/443 via XUDP with `allowUdp443` (no TCP CONNECT)
+//! 2. QUIC-shaped datagram to UDP/443 via XUDP with `allowUdp443` (no TCP CONNECT)
+//!    on the rust↔rust path when `:443` bind is permitted
 //!
-//! Not native QUIC transport. Documented route limits remain in `docs/en/development/xudp.md`.
+//! Historical only (NOT a release gate): rust-reality client → stock Xray server
+//! remains `#[ignore]`. Not native QUIC transport. See `docs/en/development/xudp.md`.
 
 use std::{
     fs,
@@ -393,6 +394,7 @@ fn stock_xray_client_udp_echo_via_rust_reality_entry() {
 }
 
 #[test]
+#[ignore = "ADR 0059: rust-reality Client → stock Xray Server is not a compatibility or release gate; retained as historical evidence only"]
 fn rust_reality_client_udp_echo_via_stock_xray_server() {
     let Some(xray) = xray_bin() else {
         eprintln!("skip: XRAY_BIN not set");
