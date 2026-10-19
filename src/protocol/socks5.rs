@@ -251,7 +251,10 @@ impl fmt::Display for DecodeError {
             }
             Self::InvalidDomainName => formatter.write_str("SOCKS5 domain destination is invalid"),
             Self::FragmentedUdp(frag) => {
-                write!(formatter, "SOCKS5 UDP fragmentation is unsupported (FRAG={frag})")
+                write!(
+                    formatter,
+                    "SOCKS5 UDP fragmentation is unsupported (FRAG={frag})"
+                )
             }
         }
     }
@@ -1013,7 +1016,6 @@ mod tests {
         assert_eq!(payload, &[0xde, 0xad]);
     }
 
-
     #[test]
     fn udp_associate_round_trips_unspecified_ipv4() {
         let dest = Destination::new(Address::Ipv4(Ipv4Addr::UNSPECIFIED), 0);
@@ -1037,7 +1039,10 @@ mod tests {
     #[test]
     fn udp_datagram_rejects_fragment() {
         let mut wire = vec![0, 0, 1, 1, 127, 0, 0, 1, 0, 53, b'x'];
-        assert_eq!(decode_udp_datagram(&wire), Err(DecodeError::FragmentedUdp(1)));
+        assert_eq!(
+            decode_udp_datagram(&wire),
+            Err(DecodeError::FragmentedUdp(1))
+        );
         wire[2] = 0;
         assert!(decode_udp_datagram(&wire).is_ok());
     }

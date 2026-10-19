@@ -6,7 +6,9 @@
 
 use std::{error::Error, fmt};
 
-use super::{Addons, AddonsDecodeError, Address, Command, Destination, UserId, VERSION, VISION_FLOW};
+use super::{
+    Addons, AddonsDecodeError, Address, Command, Destination, UserId, VERSION, VISION_FLOW,
+};
 
 /// Validation failure before any request bytes are written.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

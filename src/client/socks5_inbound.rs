@@ -57,7 +57,9 @@ pub(super) async fn handle_connection(
     group: &LineGroup,
 ) -> Result<(), Socks5Error> {
     match negotiate_and_read_request(&mut local).await? {
-        SocksRequest::Connect(destination) => handle_connect(&mut local, bound, group, destination).await,
+        SocksRequest::Connect(destination) => {
+            handle_connect(&mut local, bound, group, destination).await
+        }
         SocksRequest::UdpAssociate => handle_udp_associate(&mut local, bound, group).await,
     }
 }
@@ -70,7 +72,9 @@ async fn handle_connect(
 ) -> Result<(), Socks5Error> {
     match group.establish(&destination).await {
         Ok(mut tunnel) => {
-            write_reply(local, 0x00, bound).await.map_err(Socks5Error::Io)?;
+            write_reply(local, 0x00, bound)
+                .await
+                .map_err(Socks5Error::Io)?;
             let _ = tunnel.relay(local).await;
             Ok(())
         }
@@ -170,7 +174,11 @@ async fn read_command(
                     Err(DecodeError::IncompleteInput { .. }) => {}
                     Err(error) => return Err(Socks5Error::Protocol(error)),
                 },
-                other => return Err(Socks5Error::Protocol(DecodeError::UnsupportedCommand(other))),
+                other => {
+                    return Err(Socks5Error::Protocol(DecodeError::UnsupportedCommand(
+                        other,
+                    )));
+                }
             }
         }
         let n = stream.read(&mut buf).await.map_err(Socks5Error::Io)?;
@@ -192,9 +200,8 @@ async fn read_command(
 
 async fn write_reply(stream: &mut TcpStream, rep: u8, bound: SocketAddr) -> std::io::Result<()> {
     let mut reply = [0_u8; 22];
-    let n = encode_command_reply(rep, &bound, &mut reply).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-    })?;
+    let n = encode_command_reply(rep, &bound, &mut reply)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
     stream.write_all(&reply[..n]).await?;
     stream.flush().await
 }
