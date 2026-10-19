@@ -731,6 +731,10 @@ mod tests {
         let err = encode_xudp_packet(&dest, b"x", true, Some([1; 8]), false, &mut out)
             .expect_err("oversized domain must fail");
         assert!(matches!(err, XudpCodecError::DomainTooLong { .. }));
-        assert_eq!(out, vec![0xAA, 0xBB], "failed encode must be failure-atomic");
+        assert_eq!(
+            out,
+            vec![0xAA, 0xBB],
+            "failed encode must be failure-atomic"
+        );
     }
 }
