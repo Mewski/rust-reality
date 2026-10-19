@@ -11,7 +11,7 @@ use tokio::time::timeout;
 
 use crate::protocol::vless::{Address, Destination};
 
-use super::line::{Line, LineError};
+use super::{line::LineError, selection::LineGroup};
 
 const MAX_HEAD_LEN: usize = 8 * 1024;
 const HEAD_BUDGET: Duration = Duration::from_secs(15);
@@ -76,7 +76,10 @@ struct Request {
 }
 
 /// Handles one HTTP CONNECT client connection through `line`.
-pub(super) async fn handle_connection(mut local: TcpStream, line: &Line) -> Result<(), HttpError> {
+pub(super) async fn handle_connection(
+    mut local: TcpStream,
+    group: &LineGroup,
+) -> Result<(), HttpError> {
     let request = match timeout(HEAD_BUDGET, read_request(&mut local)).await {
         Ok(Ok(request)) => request,
         Ok(Err(error)) => {
@@ -94,7 +97,7 @@ pub(super) async fn handle_connection(mut local: TcpStream, line: &Line) -> Resu
         }
     };
 
-    match line.establish(&request.destination).await {
+    match group.establish(&request.destination).await {
         Ok(mut tunnel) => {
             write_status(&mut local, request.version, OK)
                 .await
@@ -274,7 +277,10 @@ async fn write_status(
 
 fn map_line_status(error: &LineError) -> u16 {
     match error {
-        LineError::Dial(_) | LineError::Handshake(_) | LineError::Session(_) => BAD_GATEWAY,
+        LineError::Dial(_)
+        | LineError::Handshake(_)
+        | LineError::Session(_)
+        | LineError::Selection(_) => BAD_GATEWAY,
         LineError::Config(_) => BAD_REQUEST,
     }
 }

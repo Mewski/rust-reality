@@ -35,7 +35,7 @@ pub mod user;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-pub use client::{ClientConfig, ClientRole, LineConfig};
+pub use client::{ClientConfig, ClientRole, LineConfig, LineGroupConfig, LineSelectionConfig};
 pub use entry::{EntryConfig, EntryRole};
 pub use landing::{LandingConfig, LandingProtocol, LandingRole, LandingTiming};
 pub use listener::{InboundProtocol, ListenFamily, ListenerConfig};

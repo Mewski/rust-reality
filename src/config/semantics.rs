@@ -179,11 +179,8 @@ fn validate_client(client: &ClientConfig) -> Result<(), SemanticError> {
     if client.lines.is_empty() {
         return fail("lines", "must contain at least one REALITY LINE");
     }
-    if client.lines.len() != 1 {
-        return fail(
-            "lines",
-            "single-LINE client requires exactly one LINE in this PR",
-        );
+    if client.lines.len() > 8 {
+        return fail("lines", "at most eight LINEs may be configured");
     }
     for (index, line) in client.lines.iter().enumerate() {
         let path = format!("lines[{index}]");
@@ -222,9 +219,88 @@ fn validate_client(client: &ClientConfig) -> Result<(), SemanticError> {
             );
         }
     }
+    validate_line_groups(client)?;
+    if let Some(selection) = &client.selection {
+        if let Some(hedge) = selection.hedge_ms
+            && !(50..=10_000).contains(&hedge)
+        {
+            return fail(
+                "selection.hedgeMs",
+                "must be between 50 and 10000 milliseconds",
+            );
+        }
+        if let Some(timeout) = selection.timeout_ms
+            && !(1_000..=120_000).contains(&timeout)
+        {
+            return fail(
+                "selection.timeoutMs",
+                "must be between 1000 and 120000 milliseconds",
+            );
+        }
+    }
     validate_dns(client.dns.as_ref())?;
     validate_log(client.log.as_ref())?;
     validate_runtime(client.runtime.as_ref())?;
+    Ok(())
+}
+
+fn validate_line_groups(client: &ClientConfig) -> Result<(), SemanticError> {
+    let Some(groups) = &client.line_groups else {
+        // Implicit default group: tags optional.
+        return Ok(());
+    };
+    if groups.is_empty() {
+        return fail("lineGroups", "must not be empty when present");
+    }
+    let mut names = std::collections::HashSet::new();
+    let tags: std::collections::HashSet<&str> = client
+        .lines
+        .iter()
+        .filter_map(|l| l.tag.as_deref())
+        .collect();
+    if tags.len() != client.lines.len() {
+        return fail(
+            "lines",
+            "every LINE must have a unique tag when lineGroups is set",
+        );
+    }
+    for (index, group) in groups.iter().enumerate() {
+        let path = format!("lineGroups[{index}]");
+        if group.name.is_empty() {
+            return fail(format!("{path}.name"), "must not be empty");
+        }
+        if !names.insert(group.name.as_str()) {
+            return fail(format!("{path}.name"), "group names must be unique");
+        }
+        if group.lines.is_empty() {
+            return fail(
+                format!("{path}.lines"),
+                "must contain at least one LINE tag",
+            );
+        }
+        if group.lines.len() > 8 {
+            return fail(format!("{path}.lines"), "at most eight LINEs per group");
+        }
+        let mut seen = std::collections::HashSet::new();
+        for tag in &group.lines {
+            if !tags.contains(tag.as_str()) {
+                return fail(format!("{path}.lines"), format!("unknown LINE tag `{tag}`"));
+            }
+            if !seen.insert(tag.as_str()) {
+                return fail(format!("{path}.lines"), "duplicate LINE tag in group");
+            }
+        }
+    }
+    for (index, listener) in client.listeners.iter().enumerate() {
+        if let Some(name) = &listener.line_group
+            && !names.contains(name.as_str())
+        {
+            return fail(
+                format!("listeners[{index}].lineGroup"),
+                format!("unknown line group `{name}`"),
+            );
+        }
+    }
     Ok(())
 }
 
@@ -561,6 +637,12 @@ fn reject_client_only_protocol(listeners: &[ListenerConfig]) -> Result<(), Seman
             return fail(
                 format!("listeners[{index}].protocol"),
                 "protocol is only valid on client listeners (socks5 or http)",
+            );
+        }
+        if listener.line_group.is_some() {
+            return fail(
+                format!("listeners[{index}].lineGroup"),
+                "lineGroup is only valid on client listeners",
             );
         }
     }

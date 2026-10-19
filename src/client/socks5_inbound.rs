@@ -13,7 +13,7 @@ use crate::protocol::{
     vless::Destination,
 };
 
-use super::line::{Line, LineError};
+use super::{line::LineError, selection::LineGroup};
 
 /// SOCKS5 refusal / protocol failure.
 #[derive(Debug)]
@@ -49,10 +49,10 @@ impl std::error::Error for Socks5Error {
 pub(super) async fn handle_connection(
     mut local: TcpStream,
     bound: SocketAddr,
-    line: &Line,
+    group: &LineGroup,
 ) -> Result<(), Socks5Error> {
     let destination = negotiate_and_read_request(&mut local).await?;
-    match line.establish(&destination).await {
+    match group.establish(&destination).await {
         Ok(mut tunnel) => {
             write_connect_reply(&mut local, 0x00, bound)
                 .await
@@ -154,7 +154,7 @@ async fn write_connect_reply(
 fn map_line_rep(error: &LineError) -> u8 {
     match error {
         LineError::Dial(_) => 0x05, // connection refused
-        LineError::Handshake(_) | LineError::Session(_) => 0x05,
+        LineError::Handshake(_) | LineError::Session(_) | LineError::Selection(_) => 0x05,
         LineError::Config(_) => 0x01, // general failure
     }
 }
