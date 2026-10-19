@@ -38,7 +38,7 @@ use serde::{Deserialize, Serialize};
 pub use client::{ClientConfig, ClientRole, LineConfig};
 pub use entry::{EntryConfig, EntryRole};
 pub use landing::{LandingConfig, LandingProtocol, LandingRole, LandingTiming};
-pub use listener::{ListenFamily, ListenerConfig};
+pub use listener::{InboundProtocol, ListenFamily, ListenerConfig};
 pub use outbound::{BUILTIN_BLOCK, BUILTIN_DIRECT, OutboundConfig, is_builtin_outbound};
 pub use routing::{DomainStrategy, RoutePolicy, RouteRule, RoutingConfig};
 pub use user::UserConfig;

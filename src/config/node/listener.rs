@@ -1,9 +1,10 @@
 //! Listening endpoints.
 //!
-//! Both node roles listen, so this shape is shared. What differs is the
-//! security expectation around it: an entry listener faces the public internet
-//! on a normal HTTPS port, while a landing listener must be restricted at the
-//! firewall to the line node's address.
+//! Entry, landing, and client nodes all listen, so this shape is shared. What
+//! differs is the security expectation around it: an entry listener faces the
+//! public internet on a normal HTTPS port, a landing listener must be
+//! restricted at the firewall to the line node's address, and a client
+//! listener is loopback-only SOCKS5 or HTTP CONNECT.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
@@ -35,6 +36,33 @@ pub struct ListenerConfig {
     /// Absent means every IPv6 address.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ipv6: Option<Ipv6Addr>,
+    /// Application protocol for the client role (`socks5` or `http`).
+    ///
+    /// Absent means SOCKS5 on client nodes. Entry and landing reject this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<InboundProtocol>,
+}
+
+/// Local inbound application protocol on a client listener.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InboundProtocol {
+    /// SOCKS5 no-auth CONNECT (default).
+    #[default]
+    Socks5,
+    /// HTTP/1.x `CONNECT` only (`HTTPS_PROXY=http://…`). Not a forward proxy.
+    Http,
+}
+
+impl InboundProtocol {
+    /// Stable configuration name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Socks5 => "socks5",
+            Self::Http => "http",
+        }
+    }
 }
 
 impl ListenerConfig {

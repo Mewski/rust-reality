@@ -1,4 +1,4 @@
-//! The client role: local SOCKS5 inbound and one or more REALITY LINEs.
+//! The client role: local SOCKS5 / HTTP CONNECT inbound and REALITY LINEs.
 //!
 //! A client node terminates no public REALITY identity. It listens locally,
 //! authenticates outbound to an entry, and relays application bytes through
@@ -16,7 +16,7 @@ use super::{dns::DnsConfig, listener::ListenerConfig, log::LogConfig, runtime::R
 pub struct ClientConfig {
     /// Always `client`.
     pub role: ClientRole,
-    /// Local SOCKS5 listening endpoints. Defaults are loopback-only.
+    /// Local SOCKS5 and/or HTTP CONNECT endpoints. Loopback-only; `protocol` defaults to socks5.
     pub listeners: Vec<ListenerConfig>,
     /// Authenticated LINEs to an entry. Exactly one LINE is required in PR3.
     pub lines: Vec<LineConfig>,
@@ -83,5 +83,30 @@ mod tests {
         assert_eq!(parsed.listeners.len(), 1);
         assert_eq!(parsed.lines.len(), 1);
         assert_eq!(parsed.lines[0].port, 8443);
+    }
+
+    #[test]
+    fn parses_http_connect_listener() {
+        let json = r#"{
+  "role": "client",
+  "listeners": [
+    {"port": 10808, "ipv4": "127.0.0.1"},
+    {"port": 10809, "ipv4": "127.0.0.1", "protocol": "http"}
+  ],
+  "lines": [{
+    "address": "127.0.0.1",
+    "port": 8443,
+    "id": "11111111-1111-4111-8111-111111111111",
+    "publicKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "shortId": "0102030405060708",
+    "serverName": "www.example.com"
+  }]
+}"#;
+        let parsed: ClientConfig = serde_json::from_str(json).expect("parse");
+        assert_eq!(parsed.listeners.len(), 2);
+        assert_eq!(
+            parsed.listeners[1].protocol,
+            Some(super::super::listener::InboundProtocol::Http)
+        );
     }
 }

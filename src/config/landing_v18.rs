@@ -74,6 +74,7 @@ impl LandingV18 {
                 ip: inbound.listen.mode,
                 ipv4: inbound.listen.ipv4,
                 ipv6: inbound.listen.ipv6,
+                protocol: None,
             }],
             landing: LandingProtocol::Handoff(HandoffLandingConfig {
                 psk: settings.pre_shared_key,
