@@ -92,6 +92,9 @@ pub enum XudpSessionError {
     AssociationLimit,
     FdBudgetExhausted,
     MissingNewDestination,
+    /// Keep/New carried a destination but the caller did not supply an
+    /// authorized rewrite (routing/DNS/outbound must run first).
+    UnauthorizedRewrite,
     ResolveFailed,
     IdleTimeout,
     AssociationConflict,
@@ -113,6 +116,9 @@ impl fmt::Display for XudpSessionError {
             Self::MissingNewDestination => {
                 formatter.write_str("XUDP New frame missing UDP destination")
             }
+            Self::UnauthorizedRewrite => formatter.write_str(
+                "XUDP destination rewrite was not authorized by routing policy",
+            ),
             Self::ResolveFailed => formatter.write_str("XUDP destination could not be resolved"),
             Self::IdleTimeout => formatter.write_str("XUDP association idle timeout"),
             Self::AssociationConflict => {
@@ -288,10 +294,16 @@ impl XudpDirectAssociation {
         self.destination
     }
 
-    /// Apply one decoded uplink XUDP packet: send UDP, update dest on rewrite.
+    /// Apply one decoded uplink XUDP packet: send UDP after an authorized rewrite.
+    ///
+    /// When `packet.destination` is present (New, or Keep rewrite), the caller
+    /// MUST supply `authorized_destination`: the same logical destination after
+    /// canonical routing, DNS resolution, and Direct-only outbound checks.
+    /// Associations never inherit a prior Direct decision across a rewrite.
     pub async fn handle_uplink_packet(
         &mut self,
         packet: &XudpPacket,
+        authorized_destination: Option<&Destination>,
         now: Instant,
     ) -> Result<(), XudpSessionError> {
         match packet.status {
@@ -301,7 +313,8 @@ impl XudpDirectAssociation {
             }
             XudpSessionStatus::New | XudpSessionStatus::Keep => {}
         }
-        if let Some(dest) = packet.destination.as_ref() {
+        if packet.destination.is_some() {
+            let dest = authorized_destination.ok_or(XudpSessionError::UnauthorizedRewrite)?;
             self.destination = destination_to_socket_addr(dest)?;
             self.last_destination = dest.clone();
         } else if packet.status == XudpSessionStatus::New {
@@ -456,7 +469,7 @@ mod tests {
             decode_xudp_packet(&wire).unwrap().0
         };
         assoc
-            .handle_uplink_packet(&packet, Instant::now())
+            .handle_uplink_packet(&packet, packet.destination.as_ref(), Instant::now())
             .await
             .unwrap();
 
@@ -477,6 +490,52 @@ mod tests {
         assert_eq!(assoc.uplink_datagrams(), 1);
         assert_eq!(assoc.downlink_datagrams(), 1);
         assoc.close(&globals, Instant::now());
+    }
+
+    #[tokio::test]
+    async fn uplink_rewrite_without_authorization_fails_closed() {
+        let echo = UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let dest = socket_addr_to_destination(echo.local_addr().unwrap());
+        let globals = XudpGlobalMap::new();
+        let mut assoc = XudpDirectAssociation::open(&dest, None, &globals, Instant::now())
+            .await
+            .unwrap();
+        let blocked = Destination::new(Address::Ipv4(Ipv4Addr::new(10, 0, 0, 1)), 9);
+        let packet = {
+            let mut wire = Vec::new();
+            encode_xudp_packet(&blocked, b"nope", false, None, true, &mut wire).unwrap();
+            decode_xudp_packet(&wire).unwrap().0
+        };
+        assert!(packet.destination.is_some());
+        let err = assoc
+            .handle_uplink_packet(&packet, None, Instant::now())
+            .await
+            .expect_err("rewrite without authorization must fail closed");
+        assert!(matches!(err, XudpSessionError::UnauthorizedRewrite));
+        assert_eq!(assoc.uplink_datagrams(), 0);
+        assoc.close(&globals, Instant::now());
+    }
+
+    #[test]
+    fn keep_rewrite_route_class_red_green() {
+        // GREEN: Direct remains eligible.
+        require_direct_xudp_route(XudpRouteClass::Direct).unwrap();
+        // RED: a later Keep rewrite that routes to Block/Handoff/NXR must not
+        // inherit the prior Direct decision — same fail-closed classifier.
+        assert_eq!(
+            require_direct_xudp_route(XudpRouteClass::Block),
+            Err(XudpOutboundUnsupported::Block)
+        );
+        assert_eq!(
+            require_direct_xudp_route(XudpRouteClass::Handoff),
+            Err(XudpOutboundUnsupported::Handoff)
+        );
+        assert_eq!(
+            require_direct_xudp_route(XudpRouteClass::Nxr),
+            Err(XudpOutboundUnsupported::Nxr)
+        );
     }
 
     #[tokio::test]
