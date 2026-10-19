@@ -141,7 +141,7 @@ fn spawn_udp_echo() -> (UdpSocket, u16, thread::JoinHandle<()>) {
     let echo = sock.try_clone().expect("clone");
     let handle = thread::spawn(move || {
         let mut buf = [0_u8; 65535];
-        for _ in 0..8 {
+        for _ in 0..64 {
             match echo.recv_from(&mut buf) {
                 Ok((n, from)) => {
                     let _ = echo.send_to(&buf[..n], from);
@@ -374,11 +374,26 @@ fn stock_xray_client_udp_echo_via_rust_reality_entry() {
         );
     });
     assert_eq!(body, MARKER);
+    // Honest micro-measurement: additional single-datagram RTTs after warm path.
+    let mut rtts_ms = Vec::new();
+    for i in 0..8 {
+        let payload = format!("rtt-sample-{i}").into_bytes();
+        let t0 = Instant::now();
+        let got = socks5_udp_round_trip(socks_port, echo_port, &payload)
+            .unwrap_or_else(|e| panic!("RTT sample {i} failed: {e}"));
+        assert_eq!(got, payload);
+        rtts_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+    }
+    rtts_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median = rtts_ms[rtts_ms.len() / 2];
+    eprintln!(
+        "xudp_udp_rtt_ms samples={rtts_ms:?} median_ms={median:.3} (loopback; not a capacity claim)"
+    );
     let _ = echo_thread.join();
 }
 
 #[test]
-#[ignore = "rust-reality client establish_xudp → stock Xray server still returns SOCKS ASSOCIATE rep=5; direction documented as unproven in xudp.md"]
+#[ignore = "rust-reality client establish_xudp to stock Xray server still returns SOCKS ASSOCIATE rep=5; direction documented as unproven in xudp.md"]
 fn rust_reality_client_udp_echo_via_stock_xray_server() {
     let Some(xray) = xray_bin() else {
         eprintln!("skip: XRAY_BIN not set");
