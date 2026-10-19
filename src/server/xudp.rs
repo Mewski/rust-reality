@@ -1,6 +1,6 @@
 //! Server-side XUDP association over Direct UDP egress.
 //!
-//! Framing and Vision UDP/443 policy live in [`crate::protocol::vless::xudp`].
+//! Framing and Vision UDP/443 policy live in [`crate::protocol::vless`] (`encode_xudp_packet` / `decode_xudp_packet`).
 //! This module owns UDP sockets, GlobalID affinity, resource limits, and
 //! fail-closed handling for unsupported outbounds (NXR / Handoff).
 
