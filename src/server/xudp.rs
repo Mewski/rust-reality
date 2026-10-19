@@ -116,9 +116,9 @@ impl fmt::Display for XudpSessionError {
             Self::MissingNewDestination => {
                 formatter.write_str("XUDP New frame missing UDP destination")
             }
-            Self::UnauthorizedRewrite => formatter.write_str(
-                "XUDP destination rewrite was not authorized by routing policy",
-            ),
+            Self::UnauthorizedRewrite => {
+                formatter.write_str("XUDP destination rewrite was not authorized by routing policy")
+            }
             Self::ResolveFailed => formatter.write_str("XUDP destination could not be resolved"),
             Self::IdleTimeout => formatter.write_str("XUDP association idle timeout"),
             Self::AssociationConflict => {

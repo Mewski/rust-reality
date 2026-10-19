@@ -481,7 +481,6 @@ impl VisionHandler {
         Ok(session_stats(uplink, downlink))
     }
 
-
     /// Authorize an XUDP New/Keep destination: canonical routing, DNS, Direct-only.
     ///
     /// Keep rewrites MUST call this again; a prior Direct decision must not be
