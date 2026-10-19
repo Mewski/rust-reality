@@ -59,12 +59,19 @@ ends the XUDP association; idle associations expire per `XUDP_ASSOCIATION_IDLE`.
 
 ## Cross-implementation notes
 
-- **TCP Vision / REALITY** interoperability with unmodified Xray-core (pinned
-  tag) continues to be exercised by Exact-head Native qualification.
-- **UDP via XUDP** against stock Xray as peer is desirable follow-on evidence;
-  this tree first proves our client ASSOCIATE ↔ our server Direct path and
-  framing golden vectors against the pinned `common/xudp` layout. A stock-Xray
-  UDP peer harness may land once the Direct path is on `main`.
-- Constrained-resource behaviour reuses existing association limits
-  (`XUDP_MAX_ASSOCIATIONS`, idle expire) and process FD budgets; association
-  teardown on control EOF is the cancellation path for SOCKS5 UDP ASSOCIATE.
+- **TCP Vision / REALITY** interoperability with unmodified Xray-core continues
+  to be exercised by Exact-head Native qualification.
+- **UDP via XUDP — proven:** unmodified stock Xray SOCKS client (`udp: true`,
+  flow `xtls-rprx-vision-udp443`) → rust-reality entry Direct UDP echo
+  (`tests/xudp_stock_xray_interop.rs`, requires `XRAY_BIN`).
+- **UDP via XUDP — unproven / ignored:** rust-reality unified client → stock
+  Xray VLESS+REALITY server (SOCKS ASSOCIATE currently returns rep=5 on LINE
+  establish). Do not claim this direction until the ignored test is green.
+- **QUIC/HTTP3 UDP/443:** not native QUIC transport. Policy `allowUdp443` is
+  covered by `client_socks5_udp_e2e`. A loopback echo bound on `127.0.0.1:443`
+  requires privileges this sandbox often lacks; when unbound the probe skips
+  rather than claiming a pass. No TCP CONNECT fallback is used for the UDP path.
+- GlobalID affinity is **process-wide** (`process_xudp_global_map`). Payload
+  capped at stock `buf.Size - 666` (7526); encode is failure-atomic.
+  Association limits: `XUDP_MAX_ASSOCIATIONS`, idle expire, FD budgets;
+  control EOF ends SOCKS5 UDP ASSOCIATE.
