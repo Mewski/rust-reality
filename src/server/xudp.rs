@@ -95,6 +95,8 @@ pub enum XudpSessionError {
     ResolveFailed,
     IdleTimeout,
     AssociationConflict,
+    /// Client sent a Vision Direct command on an XUDP (UDP-only) session.
+    UnexpectedVisionDirect,
 }
 
 impl fmt::Display for XudpSessionError {
@@ -115,6 +117,9 @@ impl fmt::Display for XudpSessionError {
             Self::IdleTimeout => formatter.write_str("XUDP association idle timeout"),
             Self::AssociationConflict => {
                 formatter.write_str("XUDP GlobalID association conflict while initializing")
+            }
+            Self::UnexpectedVisionDirect => {
+                formatter.write_str("Vision Direct is not valid on an XUDP session")
             }
         }
     }

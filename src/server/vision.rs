@@ -1,6 +1,7 @@
 use std::{
     error::Error,
     fmt, io,
+    net::IpAddr,
     ops::Range,
     os::fd::{AsFd as _, BorrowedFd},
     pin::Pin,
@@ -25,9 +26,10 @@ use crate::protocol::{
         TlsApplicationWriter, VectoredRead,
     },
     vless::{
-        DecodeError, Destination, RequestValidationError, UserId, VERSION, VISION_FRAME_SIZE,
-        VisionCommand, VisionDecodeError, VisionDecoder, VisionEncodeError, VisionEncoder,
-        VisionMode, VisionPayload, decode_request_ref, validate_authenticated_vision_fields,
+        Command, DecodeError, Destination, RequestValidationError, UserId, VERSION,
+        VISION_FRAME_SIZE, VisionCommand, VisionDecodeError, VisionDecoder, VisionEncodeError,
+        VisionEncoder, VisionMode, VisionPayload, authorize_authenticated_vision_xudp,
+        decode_request, decode_request_ref, validate_authenticated_vision_fields,
     },
 };
 
@@ -43,6 +45,10 @@ use super::{
     },
     reality::RealityEstablished,
     routing::{AssetMatcher, RouteResolutionError, RoutingCompileError, RoutingTable},
+    xudp::{
+        XUDP_ASSOCIATION_IDLE, XudpDirectAssociation, XudpGlobalMap, XudpSessionError,
+        drain_xudp_frames, require_direct_xudp_route,
+    },
 };
 use crate::config::node::entry::EntryConfig;
 use crate::config::node::routing::DomainStrategy;
@@ -362,12 +368,38 @@ impl VisionHandler {
             self.request_timeout,
         )
         .await?;
+        if let AcceptedVisionRequest::Xudp {
+            user_id,
+            buffer,
+            prefetched,
+        } = request
+        {
+            return self
+                .handle_xudp(
+                    client_reader,
+                    client_writer,
+                    inbound_tag.as_ref(),
+                    user_id,
+                    buffer,
+                    prefetched,
+                )
+                .await;
+        }
+        let AcceptedVisionRequest::Tcp {
+            user_id,
+            destination,
+            buffer,
+            prefetched,
+        } = request
+        else {
+            unreachable!("Xudp branch returned above");
+        };
         let route = self
             .routing
             .select_with_dns(
-                request.user_id,
-                &inbound_tag,
-                &request.destination,
+                user_id,
+                inbound_tag.as_ref(),
+                &destination,
                 self.dns_strategy,
                 self.dns_timeout,
             )
@@ -377,7 +409,7 @@ impl VisionHandler {
             .outbounds
             .connect_session_resolved(
                 route.decision().outbound(),
-                &request.destination,
+                &destination,
                 route.resolved_ips(),
             )
             .await
@@ -390,7 +422,18 @@ impl VisionHandler {
         let outcome = match outcome {
             SessionOutboundOutcome::Handoff(line) => {
                 return self
-                    .relay_via_handoff(&line, client_reader, client_writer, request, client_random)
+                    .relay_via_handoff(
+                        &line,
+                        client_reader,
+                        client_writer,
+                        AcceptedVisionRequest::Tcp {
+                            user_id,
+                            destination,
+                            buffer,
+                            prefetched,
+                        },
+                        client_random,
+                    )
                     .await;
             }
             SessionOutboundOutcome::Connected(outcome) => outcome,
@@ -402,9 +445,8 @@ impl VisionHandler {
                 .map_err(VisionSessionError::Tls)?;
             return Ok(VisionRelayStats::default());
         };
-        let (destination, outbound_permit) = connection.into_parts();
-        let (destination_reader, destination_writer) = destination.into_split();
-        let user_id = request.user_id;
+        let (destination_stream, outbound_permit) = connection.into_parts();
+        let (destination_reader, destination_writer) = destination_stream.into_split();
         // The decoder accepted VLESS v0 and this inbound never negotiates
         // response Addons, so the response is a fixed stack value.
         let response_header = [VERSION, 0];
@@ -423,8 +465,8 @@ impl VisionHandler {
             client_reader,
             destination_writer,
             user_id,
-            request.buffer,
-            request.prefetched,
+            buffer,
+            prefetched,
             &context,
         );
         let downlink = relay_downlink(
@@ -437,6 +479,231 @@ impl VisionHandler {
         let (uplink, downlink) = join_directions(uplink, downlink, &activity).await?;
         drop(outbound_permit);
         Ok(session_stats(uplink, downlink))
+    }
+
+    /// Serves one REALITY-authenticated Vision **XUDP** (Mux) session.
+    ///
+    /// XUDP frames ride inside Vision padding. Only **Direct** UDP egress is
+    /// supported; NXR/Handoff/Block routes fail closed with an explicit error.
+    async fn handle_xudp(
+        &self,
+        mut client_reader: TlsApplicationReader<OwnedReadHalf>,
+        mut client_writer: TlsApplicationWriter<OwnedWriteHalf>,
+        inbound_tag: &str,
+        user_id: UserId,
+        request_buffer: Vec<u8>,
+        prefetched: Range<usize>,
+    ) -> Result<VisionRelayStats, VisionSessionError> {
+        let activity = Arc::new(SessionActivity::default());
+        client_writer.set_activity(Arc::clone(&activity));
+
+        let mut decoder = VisionDecoder::new(user_id);
+        let mut encoder = VisionEncoder::new(user_id).map_err(VisionSessionError::VisionEncode)?;
+
+        // VLESS response + opening Vision Continue (empty), matching TCP downlink preamble.
+        let response_header = [VERSION, 0];
+        let preamble = encoder
+            .plan(0, VisionCommand::Continue, true)
+            .map_err(VisionSessionError::VisionEncode)?;
+        let preamble_len = response_header
+            .len()
+            .checked_add(preamble.wire_len())
+            .ok_or(VisionSessionError::AllocationFailed)?;
+        client_writer
+            .write_assembled(
+                preamble_len,
+                |destination| {
+                    let Some((header, frame)) =
+                        destination.split_at_mut_checked(response_header.len())
+                    else {
+                        return;
+                    };
+                    header.copy_from_slice(&response_header);
+                    encoder.assemble(&preamble, &[], frame);
+                },
+                self.io_timeout,
+            )
+            .await
+            .map_err(VisionSessionError::Tls)?;
+        encoder.commit(&preamble);
+
+        let mut vision_plaintext = Vec::new();
+        if let Some(initial) = request_buffer.get(prefetched)
+            && !initial.is_empty()
+        {
+            let mode = decoder
+                .decode_append(initial, &mut vision_plaintext)
+                .map_err(VisionSessionError::VisionDecode)?;
+            if mode == VisionMode::Direct {
+                return Err(VisionSessionError::Xudp(
+                    XudpSessionError::UnexpectedVisionDirect,
+                ));
+            }
+        }
+        drop(request_buffer);
+
+        let mut packets =
+            drain_xudp_frames(&mut vision_plaintext).map_err(VisionSessionError::Xudp)?;
+
+        // Read more TLS/Vision until the first New frame with a destination appears.
+        let mut association = None;
+        let globals = XudpGlobalMap::new();
+        let mut uplink_bytes = 0_u64;
+        let mut downlink_bytes = 0_u64;
+
+        loop {
+            for packet in packets.drain(..) {
+                if association.is_none() {
+                    let dest = packet.destination.clone().ok_or(VisionSessionError::Xudp(
+                        XudpSessionError::MissingNewDestination,
+                    ))?;
+                    let route = self
+                        .routing
+                        .select_with_dns(
+                            user_id,
+                            inbound_tag,
+                            &dest,
+                            self.dns_strategy,
+                            self.dns_timeout,
+                        )
+                        .await
+                        .map_err(VisionSessionError::Route)?;
+                    require_direct_xudp_route(
+                        self.outbounds.xudp_route_class(route.decision().outbound()),
+                    )
+                    .map_err(|error| VisionSessionError::Xudp(XudpSessionError::Outbound(error)))?;
+
+                    // Prefer DNS-resolved IPs when the XUDP destination was a domain.
+                    let bind_dest = if let Some(ip) = route.resolved_ips().first().copied() {
+                        match ip {
+                            IpAddr::V4(v4) => crate::protocol::vless::Destination::new(
+                                crate::protocol::vless::Address::Ipv4(v4),
+                                dest.port(),
+                            ),
+                            IpAddr::V6(v6) => crate::protocol::vless::Destination::new(
+                                crate::protocol::vless::Address::Ipv6(v6),
+                                dest.port(),
+                            ),
+                        }
+                    } else {
+                        dest.clone()
+                    };
+                    let now = std::time::Instant::now();
+                    let assoc =
+                        XudpDirectAssociation::open(&bind_dest, packet.global_id, &globals, now)
+                            .await
+                            .map_err(VisionSessionError::Xudp)?;
+                    association = Some(assoc);
+                }
+                if let Some(assoc) = association.as_mut() {
+                    let now = std::time::Instant::now();
+                    assoc
+                        .handle_uplink_packet(&packet, now)
+                        .await
+                        .map_err(VisionSessionError::Xudp)?;
+                    uplink_bytes = uplink_bytes.saturating_add(packet.payload.len() as u64);
+                }
+            }
+
+            if association.is_some() {
+                break;
+            }
+
+            // Need more Vision plaintext for the opening New frame.
+            let record = client_reader
+                .read_application(self.request_timeout)
+                .await
+                .map_err(VisionSessionError::Tls)?;
+            if record.is_empty() {
+                continue;
+            }
+            let (mode, payload) = decoder
+                .decode_borrowed_append(record.plaintext(), &mut vision_plaintext)
+                .map_err(VisionSessionError::VisionDecode)?;
+            if let VisionPayload::Borrowed(content) = payload {
+                vision_plaintext.extend_from_slice(content);
+            }
+            if mode == VisionMode::Direct {
+                return Err(VisionSessionError::Xudp(
+                    XudpSessionError::UnexpectedVisionDirect,
+                ));
+            }
+            packets = drain_xudp_frames(&mut vision_plaintext).map_err(VisionSessionError::Xudp)?;
+        }
+
+        let mut assoc = association.expect("opened above");
+        let mut udp_buf = vec![0_u8; 64 * 1024];
+        let mut downlink_frame = Vec::new();
+        let mut vision_frame = Vec::new();
+        let idle = XUDP_ASSOCIATION_IDLE;
+
+        // Bidirectional Vision↔UDP loop until idle timeout or peer close.
+        loop {
+            tokio::select! {
+                biased;
+                record = client_reader.read_application(self.io_timeout) => {
+                    match record {
+                        Ok(record) => {
+                            if record.is_empty() {
+                                continue;
+                            }
+                            let (mode, payload) = decoder
+                                .decode_borrowed_append(record.plaintext(), &mut vision_plaintext)
+                                .map_err(VisionSessionError::VisionDecode)?;
+                            if let VisionPayload::Borrowed(content) = payload {
+                                vision_plaintext.extend_from_slice(content);
+                            }
+                            if mode == VisionMode::Direct {
+                                break;
+                            }
+                            let more = drain_xudp_frames(&mut vision_plaintext)
+                                .map_err(VisionSessionError::Xudp)?;
+                            let now = std::time::Instant::now();
+                            for packet in more {
+                                assoc
+                                    .handle_uplink_packet(&packet, now)
+                                    .await
+                                    .map_err(VisionSessionError::Xudp)?;
+                                uplink_bytes =
+                                    uplink_bytes.saturating_add(packet.payload.len() as u64);
+                            }
+                            activity.progress();
+                        }
+                        Err(TlsApplicationIoError::PeerAlert { description: 0, .. }) => break,
+                        Err(error) => return Err(VisionSessionError::Tls(error)),
+                    }
+                }
+                recv = assoc.recv_downlink_frame(&mut udp_buf, &mut downlink_frame, std::time::Instant::now()) => {
+                    let _ = recv.map_err(VisionSessionError::Xudp)?;
+                    encoder
+                        .encode(
+                            &downlink_frame,
+                            VisionCommand::Continue,
+                            false,
+                            &mut vision_frame,
+                        )
+                        .map_err(VisionSessionError::VisionEncode)?;
+                    client_writer
+                        .write_application(&vision_frame, self.io_timeout)
+                        .await
+                        .map_err(VisionSessionError::Tls)?;
+                    downlink_bytes =
+                        downlink_bytes.saturating_add(downlink_frame.len() as u64);
+                    activity.progress();
+                }
+                () = activity.expired(idle) => {
+                    break;
+                }
+            }
+        }
+
+        assoc.close(&globals, std::time::Instant::now());
+        let _ = client_writer.shutdown(self.io_timeout).await;
+        Ok(VisionRelayStats {
+            uplink_bytes,
+            downlink_bytes,
+            ..VisionRelayStats::default()
+        })
     }
 
     /// Transfers one boundary-session to a Handoff landing node, then relays
@@ -466,6 +733,17 @@ impl VisionHandler {
         request: AcceptedVisionRequest,
         client_random: [u8; 32],
     ) -> Result<VisionRelayStats, VisionSessionError> {
+        let AcceptedVisionRequest::Tcp {
+            user_id,
+            destination,
+            buffer,
+            prefetched,
+        } = request
+        else {
+            return Err(VisionSessionError::Xudp(XudpSessionError::Outbound(
+                crate::server::xudp::XudpOutboundUnsupported::Handoff,
+            )));
+        };
         let (pending, client_read_half, client_records) = client_reader.into_handoff_parts();
         let (client_write_half, server_records, key_update_response_pending) =
             client_writer.into_handoff_parts();
@@ -485,11 +763,7 @@ impl VisionHandler {
                 .map_err(|_| HandoffLineError::Transfer(HandoffError::State))
                 .map_err(VisionSessionError::HandoffLine)?
                 .into_parts();
-            let prefetched = request
-                .buffer
-                .get(request.prefetched.clone())
-                .unwrap_or_default()
-                .to_vec();
+            let prefetched = buffer.get(prefetched).unwrap_or_default().to_vec();
             let state = ContinuationState::new(
                 suite,
                 client_traffic_secret,
@@ -497,8 +771,8 @@ impl VisionHandler {
                 server_traffic_secret,
                 server_sequence,
                 key_update_response_pending,
-                *request.user_id.as_bytes(),
-                request.destination,
+                *user_id.as_bytes(),
+                destination,
                 pending,
                 prefetched,
             )
@@ -607,14 +881,21 @@ fn reunite_handoff_client(
     Ok(client)
 }
 
-struct AcceptedVisionRequest {
-    user_id: UserId,
-    destination: Destination,
-    /// The retained request buffer. The prefetched payload is a range inside it,
-    /// so no copy is made when the VLESS header and its payload prefix arrive in
-    /// the same record.
-    buffer: Vec<u8>,
-    prefetched: Range<usize>,
+enum AcceptedVisionRequest {
+    /// Ordinary Vision TCP with a VLESS destination.
+    Tcp {
+        user_id: UserId,
+        destination: Destination,
+        /// The retained request buffer. Prefetched payload is a range inside it.
+        buffer: Vec<u8>,
+        prefetched: Range<usize>,
+    },
+    /// Vision XUDP (Mux command) — destination comes from the first XUDP New frame.
+    Xudp {
+        user_id: UserId,
+        buffer: Vec<u8>,
+        prefetched: Range<usize>,
+    },
 }
 
 /// Combines both directions' counters into per-session relay statistics.
@@ -732,28 +1013,50 @@ where
         match decode_request_ref(&buffer) {
             Ok(decoded) => {
                 let payload_len = decoded.payload().len();
-                validate_authenticated_vision_fields(
-                    decoded.user_id(),
-                    decoded.addons(),
-                    decoded.command(),
-                    decoded.destination().is_some(),
-                    authenticated_user_id,
-                )
-                .map_err(VisionSessionError::Validate)?;
                 let user_id = decoded.user_id();
-                let destination = decoded
-                    .destination()
-                    .map(|destination| destination.into_owned())
-                    .ok_or(VisionSessionError::Validate(
-                        RequestValidationError::MissingDestination,
-                    ))?;
+                let command = decoded.command();
                 let prefetched_start = buffer.len().saturating_sub(payload_len);
-                return Ok(AcceptedVisionRequest {
-                    user_id,
-                    destination,
-                    prefetched: prefetched_start..buffer.len(),
-                    buffer,
-                });
+                let prefetched = prefetched_start..buffer.len();
+                match command {
+                    Command::Tcp => {
+                        validate_authenticated_vision_fields(
+                            user_id,
+                            decoded.addons(),
+                            command,
+                            decoded.destination().is_some(),
+                            authenticated_user_id,
+                        )
+                        .map_err(VisionSessionError::Validate)?;
+                        let destination = decoded
+                            .destination()
+                            .map(|destination| destination.into_owned())
+                            .ok_or(VisionSessionError::Validate(
+                                RequestValidationError::MissingDestination,
+                            ))?;
+                        return Ok(AcceptedVisionRequest::Tcp {
+                            user_id,
+                            destination,
+                            prefetched,
+                            buffer,
+                        });
+                    }
+                    Command::Mux => {
+                        // Re-parse owned header for the shared XUDP authorizer.
+                        let owned = decode_request(&buffer).map_err(VisionSessionError::Decode)?;
+                        authorize_authenticated_vision_xudp(owned.header(), authenticated_user_id)
+                            .map_err(VisionSessionError::Validate)?;
+                        return Ok(AcceptedVisionRequest::Xudp {
+                            user_id,
+                            prefetched,
+                            buffer,
+                        });
+                    }
+                    other => {
+                        return Err(VisionSessionError::Validate(
+                            RequestValidationError::UnsupportedCommand(other),
+                        ));
+                    }
+                }
             }
             Err(DecodeError::UnexpectedEnd { .. }) if buffer.len() < MAX_REQUEST_HEADER_SIZE => {}
             Err(DecodeError::UnexpectedEnd { .. }) => {
@@ -2343,6 +2646,7 @@ pub enum VisionSessionError {
     HandoffLine(HandoffLineError),
     Relay(io::Error),
     Io(io::Error),
+    Xudp(XudpSessionError),
 }
 
 impl fmt::Display for VisionSessionError {
@@ -2368,6 +2672,7 @@ impl fmt::Display for VisionSessionError {
             Self::HandoffLine(source) => source.fmt(formatter),
             Self::Relay(_) => formatter.write_str("unified raw relay failed"),
             Self::Io(_) => formatter.write_str("Vision relay socket I/O failed"),
+            Self::Xudp(source) => source.fmt(formatter),
         }
     }
 }
@@ -2385,6 +2690,7 @@ impl Error for VisionSessionError {
             Self::DirectTransition(source) => Some(source),
             Self::Handoff(source) | Self::Relay(source) | Self::Io(source) => Some(source),
             Self::HandoffLine(source) => Some(source),
+            Self::Xudp(source) => Some(source),
             Self::Timeout
             | Self::AllocationFailed
             | Self::RequestTooLarge { .. }
