@@ -9,7 +9,7 @@ use std::{
     error::Error,
     fmt,
     net::SocketAddr,
-    sync::Mutex,
+    sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -165,7 +165,10 @@ pub fn destination_to_socket_addr(
     }
 }
 
-/// Process-wide GlobalID map (cone-NAT affinity), mirroring stock `XUDPManager`.
+/// GlobalID map (cone-NAT affinity), mirroring stock `XUDPManager`.
+///
+/// Use [`process_xudp_global_map`] for the process-wide instance. Capacity
+/// [`XUDP_MAX_ASSOCIATIONS`] is enforced on that shared map, not per session.
 #[derive(Default)]
 pub struct XudpGlobalMap {
     inner: Mutex<HashMap<XudpGlobalId, GlobalEntry>>,
@@ -236,6 +239,15 @@ impl XudpGlobalMap {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         self.purge_locked(&mut guard, now);
     }
+}
+
+/// Returns the process-wide GlobalID association map (stock `XUDPManager`).
+///
+/// All Vision XUDP sessions share this map so capacity and affinity accounting
+/// are truly process-wide, not per Mux/TLS session.
+pub fn process_xudp_global_map() -> &'static XudpGlobalMap {
+    static GLOBALS: OnceLock<XudpGlobalMap> = OnceLock::new();
+    GLOBALS.get_or_init(XudpGlobalMap::new)
 }
 
 /// One Direct UDP association for an XUDP Mux session (session id 0).
@@ -413,6 +425,13 @@ mod tests {
             require_direct_xudp_route(XudpRouteClass::Block),
             Err(XudpOutboundUnsupported::Block)
         );
+    }
+
+    #[test]
+    fn process_global_map_is_shared_across_calls() {
+        let a = process_xudp_global_map() as *const XudpGlobalMap;
+        let b = process_xudp_global_map() as *const XudpGlobalMap;
+        assert_eq!(a, b);
     }
 
     #[test]

@@ -74,6 +74,8 @@ ends the XUDP association; idle associations expire per `XUDP_ASSOCIATION_IDLE`.
   this tree first proves our client ASSOCIATE ↔ our server Direct path and
   framing golden vectors against the pinned `common/xudp` layout. A stock-Xray
   UDP peer harness may land once the Direct path is on `main`.
-- Constrained-resource behaviour reuses existing association limits
-  (`XUDP_MAX_ASSOCIATIONS`, idle expire) and process FD budgets; association
+- GlobalID affinity uses a **process-wide** map (`process_xudp_global_map`,
+  stock `XUDPManager`). Payload is capped at stock `buf.Size - 666` (7526);
+  encode is failure-atomic. Constrained-resource behaviour also uses
+  `XUDP_MAX_ASSOCIATIONS`, idle expire, and process FD budgets; association
   teardown on control EOF is the cancellation path for SOCKS5 UDP ASSOCIATE.

@@ -46,8 +46,8 @@ use super::{
     reality::RealityEstablished,
     routing::{AssetMatcher, RouteResolutionError, RoutingCompileError, RoutingTable},
     xudp::{
-        XUDP_ASSOCIATION_IDLE, XudpDirectAssociation, XudpGlobalMap, XudpSessionError,
-        drain_xudp_frames, require_direct_xudp_route,
+        XUDP_ASSOCIATION_IDLE, XudpDirectAssociation, XudpSessionError, drain_xudp_frames,
+        process_xudp_global_map, require_direct_xudp_route,
     },
 };
 use crate::config::node::entry::EntryConfig;
@@ -586,7 +586,7 @@ impl VisionHandler {
 
         // Read more TLS/Vision until the first New frame with a destination appears.
         let mut association = None;
-        let globals = XudpGlobalMap::new();
+        let globals = process_xudp_global_map();
         let mut uplink_bytes = 0_u64;
         let mut downlink_bytes = 0_u64;
 
@@ -606,7 +606,7 @@ impl VisionHandler {
                     ))?;
                     let now = std::time::Instant::now();
                     let assoc =
-                        XudpDirectAssociation::open(&bind_dest, packet.global_id, &globals, now)
+                        XudpDirectAssociation::open(&bind_dest, packet.global_id, globals, now)
                             .await
                             .map_err(VisionSessionError::Xudp)?;
                     association = Some(assoc);
@@ -726,7 +726,7 @@ impl VisionHandler {
             }
         }
 
-        assoc.close(&globals, std::time::Instant::now());
+        assoc.close(globals, std::time::Instant::now());
         let _ = client_writer.shutdown(self.io_timeout).await;
         Ok(VisionRelayStats {
             uplink_bytes,
