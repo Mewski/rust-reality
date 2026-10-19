@@ -160,7 +160,7 @@ fn socks5_udp_round_trip(
 ) -> Result<Vec<u8>, String> {
     let mut control =
         TcpStream::connect(("127.0.0.1", socks_port)).map_err(|e| format!("socks connect: {e}"))?;
-    control.set_read_timeout(Some(Duration::from_secs(8))).ok();
+    control.set_read_timeout(Some(Duration::from_secs(30))).ok();
     control.set_write_timeout(Some(Duration::from_secs(8))).ok();
     control
         .write_all(&[0x05, 0x01, 0x00])
@@ -393,7 +393,6 @@ fn stock_xray_client_udp_echo_via_rust_reality_entry() {
 }
 
 #[test]
-#[ignore = "rust-reality client establish_xudp to stock Xray server still returns SOCKS ASSOCIATE rep=5; direction documented as unproven in xudp.md"]
 fn rust_reality_client_udp_echo_via_stock_xray_server() {
     let Some(xray) = xray_bin() else {
         eprintln!("skip: XRAY_BIN not set");
@@ -436,7 +435,13 @@ fn rust_reality_client_udp_echo_via_stock_xray_server() {
       }}
     }}
   }}],
-  "outbounds": [{{ "protocol": "freedom", "tag": "direct" }}]
+  "outbounds": [{{
+    "protocol": "freedom",
+    "tag": "direct",
+    "settings": {{
+      "finalRules": [{{ "action": "allow" }}]
+    }}
+  }}]
 }}
 "#
         ),

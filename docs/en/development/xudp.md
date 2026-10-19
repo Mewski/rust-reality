@@ -67,13 +67,24 @@ ends the XUDP association; idle associations expire per `XUDP_ASSOCIATION_IDLE`.
   Local loopback single-datagram RTT samples (warm path) reported median
   ≈8 ms in one sandbox run — setup/teardown wall clock is separate and
   **not** a throughput claim.
-- **UDP via XUDP — unproven / ignored:** rust-reality unified client → stock
-  Xray VLESS+REALITY server (SOCKS ASSOCIATE currently returns rep=5 on LINE
-  establish). Do not claim this direction until the ignored test is green.
-- **QUIC/HTTP3 UDP/443:** not native QUIC transport. Policy `allowUdp443` is
-  covered by `client_socks5_udp_e2e`. A loopback echo bound on `127.0.0.1:443`
-  requires privileges this sandbox often lacks; when unbound the probe skips
-  rather than claiming a pass. No TCP CONNECT fallback is used for the UDP path.
+- **UDP via XUDP — proven:** rust-reality unified client → stock Xray
+  VLESS+REALITY server (Vision flow) Direct UDP echo (same interop test file).
+  Requires: (1) Go-parseable ClientHello (`status_request` OCSP empty lists and
+  `psk_key_exchange_modes` `0x002d`; a prior `0x2d00` typo plus a 2-byte status
+  body made stock Xray report `failed to read client hello`); (2) stock Xray
+  `freedom.finalRules: [{action: allow}]` so loopback/private destinations are
+  not blackholed by the default VLESS private-IP block; (3) client defers the
+  VLESS response read until after the first uplink XUDP frame (stock inbound
+  `SetFlushNext` only flushes on first downlink write).
+- **QUIC/HTTP3 UDP/443:** not native QUIC transport on the REALITY LINE. XUDP
+  carries UDP datagrams; `allowUdp443` gates destination port 443 (stock
+  vision-udp443 policy). The interop probe sends a QUIC-shaped payload to
+  `127.0.0.1:443` via SOCKS5 UDP ASSOCIATE only (no TCP CONNECT). Binding
+  `:443` needs privileges many sandboxes lack — then the probe **skips**
+  (fail-closed, not a green pass). Native/privileged runners should bind and
+  exercise the path. Full browser-grade HTTP/3 over this UDP path is out of
+  scope for this gate; the proof is XUDP delivery to UDP/443 without TCP
+  fallback.
 - GlobalID affinity is **process-wide** (`process_xudp_global_map`). Payload
   capped at stock `buf.Size - 666` (7526); encode is failure-atomic.
   Association limits: `XUDP_MAX_ASSOCIATIONS`, idle expire, FD budgets;

@@ -358,8 +358,10 @@ fn assemble(
         }
         Ok(())
     })?;
+    // RFC 6066 / Go crypto/tls: status_type=ocsp, empty responder list, empty extensions.
+    // A 2-byte body is rejected by stock Xray (Go) with "error decoding message".
     push_extension(&mut extensions, 0x0005, |body| {
-        body.extend_from_slice(&[0, 0]);
+        body.extend_from_slice(&[1, 0, 0, 0, 0]);
         Ok(())
     })?;
     push_extension(&mut extensions, 0x0010, |body| {
@@ -372,8 +374,11 @@ fn assemble(
         }
         Ok(())
     })?;
-    push_extension(&mut extensions, 0x2d00, |body| {
-        body.extend_from_slice(&[1, 1]);
+    // psk_key_exchange_modes (0x002d), not the typo 0x2d00. Stock Xray requires a
+    // parseable ClientHello; the wrong type was skipped as unknown but paired with
+    // the broken status_request above made Go abort the handshake.
+    push_extension(&mut extensions, 0x002d, |body| {
+        body.extend_from_slice(&[1, 1]); // modes_len=1, psk_dhe_ke
         Ok(())
     })?;
     push_extension(&mut extensions, 0x002b, |body| {
@@ -587,5 +592,50 @@ mod tests {
         assert!(record.key_share_group_offered(X25519_MLKEM768_GROUP));
         assert!(record.key_share_group_offered(X25519_GROUP));
         assert!(record.cipher_offered(0x1301));
+    }
+
+    #[test]
+    fn client_hello_extensions_match_stock_xray_go_parser() {
+        let keys = ClientKeyAgreement::generate().expect("keys");
+        let (record, _) =
+            build_client_hello(NAME, ALPN, &keys, &[0x22; 32], plaintext(1)).expect("hello");
+        let message = record.message();
+        // Skip handshake header (4) + legacy_ver(2)+random(32)+session_id
+        let sid_len = message[4 + 2 + 32] as usize;
+        let mut off = 4 + 2 + 32 + 1 + sid_len;
+        let cs_len = u16::from_be_bytes([message[off], message[off + 1]]) as usize;
+        off += 2 + cs_len;
+        let comp_len = message[off] as usize;
+        off += 1 + comp_len;
+        let ext_len = u16::from_be_bytes([message[off], message[off + 1]]) as usize;
+        off += 2;
+        let end = off + ext_len;
+        let mut saw_status = false;
+        let mut saw_psk_modes = false;
+        while off + 4 <= end {
+            let et = u16::from_be_bytes([message[off], message[off + 1]]);
+            let el = u16::from_be_bytes([message[off + 2], message[off + 3]]) as usize;
+            off += 4;
+            let body = &message[off..off + el];
+            off += el;
+            match et {
+                0x0005 => {
+                    saw_status = true;
+                    assert_eq!(
+                        body,
+                        &[1, 0, 0, 0, 0],
+                        "status_request must be OCSP empty lists"
+                    );
+                }
+                0x002d => {
+                    saw_psk_modes = true;
+                    assert_eq!(body, &[1, 1], "psk_key_exchange_modes");
+                }
+                0x2d00 => panic!("legacy typo extension 0x2d00 must not be present"),
+                _ => {}
+            }
+        }
+        assert!(saw_status, "status_request required for Go crypto/tls");
+        assert!(saw_psk_modes, "psk_key_exchange_modes 0x002d required");
     }
 }
