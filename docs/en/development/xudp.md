@@ -79,6 +79,8 @@ Directional contract (AGENTS.md §6, ADR 0059):
   (Go ClientHello parse, inbound `SetFlushNext` response ordering, freedom
   private-IP default block) is retained for archaeology; the test stays
   `#[ignore]` and MUST NOT block merge or release.
+  Exploratory commit messages that mention enabling RR→Xray (e.g. tree history
+  around ClientHello fixes) are **not** mandatory acceptance criteria.
 - **QUIC/HTTP3 UDP/443 (rust↔rust):** not native QUIC transport on the REALITY
   LINE. XUDP carries UDP datagrams; `allowUdp443` gates destination port 443
   (stock vision-udp443 policy). Mandatory verification uses SOCKS5 UDP
