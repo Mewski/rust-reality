@@ -7,6 +7,7 @@ mod response;
 mod types;
 mod validate;
 mod vision;
+mod xudp;
 
 pub use addons::{Addons, AddonsDecodeError, VISION_FLOW};
 pub(crate) use decode::decode_request_ref;
@@ -35,10 +36,23 @@ pub fn fuzz_validate_short_id_owner(
         authenticated_user_id,
     )
 }
-pub use validate::{RequestValidationError, UserRegistry, authorize_authenticated_vision_tcp};
+pub use validate::{
+    RequestValidationError, UserRegistry, authorize_authenticated_vision_tcp,
+    authorize_authenticated_vision_xudp,
+};
 pub use vision::{
     VISION_FRAME_SIZE, VisionCommand, VisionDecodeError, VisionDecoder, VisionEncodeError,
     VisionEncoder, VisionFramePlan, VisionMode, VisionPayload,
+};
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub use xudp::fuzz_decode_xudp_packet;
+pub use xudp::{
+    VISION_FLOW_UDP443, XUDP_MAX_META_LEN, XUDP_MAX_PAYLOAD_LEN, XUDP_MUX_HOST, XUDP_MUX_PORT,
+    XudpCodecError, XudpGlobalId, XudpNetwork, XudpOption, XudpPacket, XudpSessionStatus,
+    config_flow_allows_udp_443, decode_xudp_packet, encode_xudp_packet, frame_looks_like_xudp,
+    is_xudp_mux_command, meta_body_is_xudp, vision_udp_command_allows_port,
+    wire_vision_flow_from_config,
 };
 
 pub use client::{

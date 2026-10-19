@@ -57,6 +57,38 @@ impl UserRegistry {
     }
 }
 
+/// Authorizes an Xray-compatible VLESS Vision **XUDP** request after REALITY has
+/// authenticated the short ID and resolved its owning UUID.
+///
+/// XUDP uses VLESS command Mux (`0x03`) with no address on the VLESS header
+/// (synthetic `v1.mux.cool:666`). Wire Addons must still carry `xtls-rprx-vision`.
+/// UDP-only enforcement for framed datagrams is applied by the XUDP codec, not here.
+pub fn authorize_authenticated_vision_xudp(
+    request: &RequestHeader,
+    authenticated_user_id: UserId,
+) -> Result<(), RequestValidationError> {
+    if request.user_id() != authenticated_user_id {
+        return Err(RequestValidationError::ShortIdOwnerMismatch);
+    }
+
+    let addons = Addons::parse(request.addons()).map_err(RequestValidationError::Addons)?;
+    if addons.flow() != Some(VISION_FLOW) {
+        return Err(RequestValidationError::VisionFlowRequired);
+    }
+
+    if request.command() != Command::Mux {
+        return Err(RequestValidationError::UnsupportedCommand(
+            request.command(),
+        ));
+    }
+
+    // Mux/XUDP has no VLESS-header destination (decoder leaves it None).
+    if request.destination().is_some() {
+        return Err(RequestValidationError::UnexpectedMuxDestination);
+    }
+    Ok(())
+}
+
 /// Authorizes an Xray-compatible VLESS Vision TCP request after REALITY has
 /// authenticated the short ID and resolved its owning UUID.
 ///
@@ -129,6 +161,9 @@ pub enum RequestValidationError {
 
     /// A TCP request did not contain a destination.
     MissingDestination,
+
+    /// A Mux/XUDP request unexpectedly carried a VLESS-header destination.
+    UnexpectedMuxDestination,
 }
 
 impl fmt::Display for RequestValidationError {
@@ -151,6 +186,9 @@ impl fmt::Display for RequestValidationError {
                 write!(formatter, "VLESS command {command:?} is not supported")
             }
             Self::MissingDestination => formatter.write_str("VLESS TCP request has no destination"),
+            Self::UnexpectedMuxDestination => {
+                formatter.write_str("VLESS Mux/XUDP request must not carry a destination")
+            }
         }
     }
 }
@@ -161,7 +199,10 @@ impl Error for RequestValidationError {}
 mod tests {
     use std::net::Ipv4Addr;
 
-    use super::{RequestValidationError, UserRegistry, authorize_authenticated_vision_tcp};
+    use super::{
+        RequestValidationError, UserRegistry, authorize_authenticated_vision_tcp,
+        authorize_authenticated_vision_xudp,
+    };
     use crate::protocol::vless::{Address, Command, Destination, RequestHeader, UserId, VERSION};
 
     const ALLOWED_USER: UserId = UserId::new([0x11; 16]);
@@ -296,6 +337,37 @@ mod tests {
 
     fn destination() -> Destination {
         Destination::new(Address::Ipv4(Ipv4Addr::LOCALHOST), 443)
+    }
+
+    #[test]
+    fn authorizes_vision_xudp_mux_request() {
+        let mut addons = vec![0x0a, 16];
+        addons.extend_from_slice(crate::protocol::vless::VISION_FLOW.as_bytes());
+        let request = request_header(ALLOWED_USER, addons, Command::Mux, None);
+        authorize_authenticated_vision_xudp(&request, ALLOWED_USER)
+            .expect("Vision Mux/XUDP should authorize");
+    }
+
+    #[test]
+    fn rejects_vision_xudp_with_tcp_command() {
+        let mut addons = vec![0x0a, 16];
+        addons.extend_from_slice(crate::protocol::vless::VISION_FLOW.as_bytes());
+        let request = request_header(ALLOWED_USER, addons, Command::Tcp, Some(destination()));
+        assert_eq!(
+            authorize_authenticated_vision_xudp(&request, ALLOWED_USER),
+            Err(RequestValidationError::UnsupportedCommand(Command::Tcp))
+        );
+    }
+
+    #[test]
+    fn rejects_vision_xudp_with_destination() {
+        let mut addons = vec![0x0a, 16];
+        addons.extend_from_slice(crate::protocol::vless::VISION_FLOW.as_bytes());
+        let request = request_header(ALLOWED_USER, addons, Command::Mux, Some(destination()));
+        assert_eq!(
+            authorize_authenticated_vision_xudp(&request, ALLOWED_USER),
+            Err(RequestValidationError::UnexpectedMuxDestination)
+        );
     }
 
     fn request_header(
