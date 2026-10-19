@@ -480,7 +480,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn association_close_releases_global_slot_for_reuse() {
+    async fn association_close_then_purge_releases_global_slot() {
         let echo = UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
             .unwrap();
@@ -492,9 +492,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(globals.len(), 1);
+        // close marks the GlobalID expired; purge drops it (control-EOF / cancel path).
         assoc.close(&globals, now);
+        globals.purge(now + XUDP_ASSOCIATION_IDLE + Duration::from_secs(1));
         assert_eq!(globals.len(), 0);
-        // Slot reusable after close (cancellation / control EOF path).
         let again = XudpDirectAssociation::open(&dest, Some(gid), &globals, now)
             .await
             .unwrap();
