@@ -6,7 +6,7 @@
 
 use std::{error::Error, fmt};
 
-use super::{Addons, AddonsDecodeError, Address, Destination, UserId, VERSION, VISION_FLOW};
+use super::{Addons, AddonsDecodeError, Address, Command, Destination, UserId, VERSION, VISION_FLOW};
 
 /// Validation failure before any request bytes are written.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -89,6 +89,29 @@ pub fn encode_vision_tcp_request(
             output[prefix_len + 2..needed].copy_from_slice(domain.as_bytes());
         }
     }
+    Ok(needed)
+}
+
+/// Encodes a version-zero Vision Mux/XUDP request (command `0x03`, no address).
+///
+/// Stock Xray synthesizes `v1.mux.cool:666` on decode and does not write an
+/// address on the wire for Mux. Wire Addons still carry [`VISION_FLOW`].
+pub fn encode_vision_xudp_request(
+    user: UserId,
+    output: &mut [u8],
+) -> Result<usize, RequestEncodeError> {
+    // version, user, addons length, protobuf key/length/flow, command — no port/address.
+    let needed = 1 + 16 + 1 + 2 + VISION_FLOW.len() + 1;
+    if output.len() < needed {
+        return Err(RequestEncodeError::BufferTooSmall { needed });
+    }
+    output[0] = VERSION;
+    output[1..17].copy_from_slice(user.as_bytes());
+    output[17] = (2 + VISION_FLOW.len()) as u8;
+    output[18] = 0x0a;
+    output[19] = VISION_FLOW.len() as u8;
+    output[20..20 + VISION_FLOW.len()].copy_from_slice(VISION_FLOW.as_bytes());
+    output[20 + VISION_FLOW.len()] = Command::Mux.as_byte();
     Ok(needed)
 }
 
@@ -348,5 +371,15 @@ mod tests {
             std::hint::black_box(decode_response(&[0, 2, 0x18, 1, 9]).unwrap());
         });
         assert_eq!(allocation.count_total, 0);
+    }
+
+    #[test]
+    fn encode_vision_xudp_request_has_mux_and_no_destination() {
+        let mut bytes = [0_u8; 128];
+        let n = encode_vision_xudp_request(UserId::new([0x11; 16]), &mut bytes).unwrap();
+        let decoded = decode_request(&bytes[..n]).expect("decode mux");
+        assert_eq!(decoded.header().command(), Command::Mux);
+        assert_eq!(decoded.header().destination(), None);
+        assert!(decoded.payload().is_empty());
     }
 }

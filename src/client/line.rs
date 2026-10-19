@@ -25,6 +25,7 @@ use crate::{
 };
 
 use super::session::{VisionTunnel, VisionTunnelError};
+use super::xudp::XudpTunnel;
 
 const ALPN: &[&[u8]] = &[b"h2", b"http/1.1"];
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -39,6 +40,7 @@ pub struct Line {
     public_key: [u8; 32],
     short_id: [u8; 8],
     server_name: String,
+    allow_udp_443: bool,
 }
 
 /// REALITY completed; VLESS Vision not yet started.
@@ -47,6 +49,7 @@ pub struct AuthenticatedLine {
     session: ClientSession,
     user_id: UserId,
     tag: Option<String>,
+    allow_udp_443: bool,
 }
 
 /// A LINE could not be compiled or established.
@@ -99,6 +102,7 @@ impl Line {
             public_key,
             short_id,
             server_name: config.server_name.clone(),
+            allow_udp_443: config.allow_udp_443,
         })
     }
 
@@ -148,6 +152,7 @@ impl Line {
             session,
             user_id: self.user_id,
             tag: self.tag.clone(),
+            allow_udp_443: self.allow_udp_443,
         })
     }
 
@@ -167,6 +172,13 @@ impl AuthenticatedLine {
     /// Sends the Vision TCP request. Must run only after selection adoption.
     pub async fn open(self, destination: &Destination) -> Result<VisionTunnel, LineError> {
         VisionTunnel::connect(self.stream, self.session, self.user_id, destination)
+            .await
+            .map_err(LineError::Session)
+    }
+
+    /// Opens Vision Mux/XUDP on this committed LINE. Must run only after adoption.
+    pub async fn open_xudp(self) -> Result<XudpTunnel, LineError> {
+        XudpTunnel::connect(self.stream, self.session, self.user_id, self.allow_udp_443)
             .await
             .map_err(LineError::Session)
     }

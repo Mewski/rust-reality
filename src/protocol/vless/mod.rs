@@ -57,5 +57,5 @@ pub use xudp::{
 
 pub use client::{
     DecodeResponse, RequestEncodeError, ResponseDecodeError, decode_response,
-    encode_vision_tcp_request,
+    encode_vision_tcp_request, encode_vision_xudp_request,
 };

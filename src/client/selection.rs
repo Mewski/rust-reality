@@ -25,6 +25,7 @@ use rr_session::ClientCandidate;
 use super::{
     line::{AuthenticatedLine, Line, LineError},
     session::VisionTunnel,
+    xudp::XudpTunnel,
 };
 
 const DEFAULT_HEDGE: Duration = Duration::from_millis(275);
@@ -98,6 +99,14 @@ impl LineGroup {
         let adopted = self.authenticate().await?;
         // Post-commit: never migrate. open failure is terminal for this attempt.
         adopted.open(destination).await
+    }
+
+    /// Selects one authenticated LINE then opens Vision Mux/XUDP.
+    ///
+    /// Same commit rules as [`Self::establish`]: no mid-session LINE migration.
+    pub async fn establish_xudp(&self) -> Result<XudpTunnel, LineError> {
+        let adopted = self.authenticate().await?;
+        adopted.open_xudp().await
     }
 
     /// Health snapshot for tests and diagnostics: fault counts per LINE index.
@@ -291,6 +300,7 @@ mod tests {
             public_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
             short_id: "0102030405060708".to_owned(),
             server_name: "www.example.com".to_owned(),
+            allow_udp_443: false,
         }
     }
 
