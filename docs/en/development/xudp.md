@@ -64,6 +64,9 @@ ends the XUDP association; idle associations expire per `XUDP_ASSOCIATION_IDLE`.
 - **UDP via XUDP — proven:** unmodified stock Xray SOCKS client (`udp: true`,
   flow `xtls-rprx-vision-udp443`) → rust-reality entry Direct UDP echo
   (`tests/xudp_stock_xray_interop.rs`, requires `XRAY_BIN`).
+  Local loopback single-datagram RTT samples (warm path) reported median
+  ≈8 ms in one sandbox run — setup/teardown wall clock is separate and
+  **not** a throughput claim.
 - **UDP via XUDP — unproven / ignored:** rust-reality unified client → stock
   Xray VLESS+REALITY server (SOCKS ASSOCIATE currently returns rep=5 on LINE
   establish). Do not claim this direction until the ignored test is green.
