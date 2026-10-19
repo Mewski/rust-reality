@@ -56,3 +56,15 @@ UDP datagrams inside Vision/XUDP over the existing REALITY LINE.
 
 Cancellation and association teardown: closing the SOCKS5 TCP control connection
 ends the XUDP association; idle associations expire per `XUDP_ASSOCIATION_IDLE`.
+
+## Cross-implementation notes
+
+- **TCP Vision / REALITY** interoperability with unmodified Xray-core (pinned
+  tag) continues to be exercised by Exact-head Native qualification.
+- **UDP via XUDP** against stock Xray as peer is desirable follow-on evidence;
+  this tree first proves our client ASSOCIATE ↔ our server Direct path and
+  framing golden vectors against the pinned `common/xudp` layout. A stock-Xray
+  UDP peer harness may land once the Direct path is on `main`.
+- Constrained-resource behaviour reuses existing association limits
+  (`XUDP_MAX_ASSOCIATIONS`, idle expire) and process FD budgets; association
+  teardown on control EOF is the cancellation path for SOCKS5 UDP ASSOCIATE.
