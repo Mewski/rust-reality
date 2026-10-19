@@ -6,7 +6,7 @@ use rust_reality::protocol::{
     reality::ClientHello,
     vless::{
         Command, decode_request, decode_response, encode_vision_tcp_request,
-        fuzz_decode_request_ref,
+        fuzz_decode_request_ref, fuzz_decode_xudp_packet,
     },
 };
 
@@ -31,6 +31,7 @@ fuzz_target!(|input: &[u8]| {
         assert_eq!(decoded.payload(), &input[header_len..]);
     }
     fuzz_decode_request_ref(input);
+    fuzz_decode_xudp_packet(input);
     if let Ok(hello) = ClientHello::parse_message(input) {
         let _ = hello.normalized_profile_class();
     }
