@@ -651,13 +651,13 @@ async fn genuine_http3_over_xudp_udp443_no_tcp_fallback() {
             .expect("accept")
             .await
             .expect("handshake");
-        if let Some(data) = incoming.handshake_data()
-            && let Ok(hs) = data.downcast::<quinn::crypto::rustls::HandshakeData>()
-        {
-            let alpn = hs.protocol.clone().unwrap_or_default();
-            eprintln!("h3-origin negotiated ALPN={alpn:?}");
-            assert_eq!(alpn.as_slice(), b"h3", "origin ALPN must be h3");
-        }
+        let origin_alpn = incoming
+            .handshake_data()
+            .and_then(|data| data.downcast::<quinn::crypto::rustls::HandshakeData>().ok())
+            .and_then(|hs| hs.protocol)
+            .unwrap_or_default();
+        eprintln!("h3-origin negotiated ALPN={origin_alpn:?}");
+        assert_eq!(origin_alpn.as_slice(), b"h3", "origin ALPN must be h3");
         let mut h3 = h3::server::builder()
             .build(h3_quinn::Connection::new(incoming))
             .await
