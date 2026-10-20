@@ -543,7 +543,10 @@ impl VisionHandler {
     /// LINE never decrypts that session again after a successful transfer.
     /// Keep rewrites re-authorize; capability changes and Block fail closed
     /// with zero landward packets (no silent Direct fallback).
-    #[allow(clippy::too_many_arguments, reason = "explicit XUDP session boundary fields")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "explicit XUDP session boundary fields"
+    )]
     async fn handle_xudp(
         &self,
         mut client_reader: TlsApplicationReader<OwnedReadHalf>,
