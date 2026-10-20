@@ -7,7 +7,7 @@
 //! ADR 0060 / Issue #314: NXR and Handoff are **authorized** route classes (not
 //! silently remapped to Direct). NXR landward uses framed datagrams over the
 //! existing LINE→LANDING TCP hop ([`XudpNxrAssociation`]). Handoff UDP remains
-//! fail-closed until a later PR — never silently opened as Direct.
+//! opened via Handoff transfer (LINE never owns landward UDP) — never silently as Direct.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -93,7 +93,7 @@ pub enum XudpRouteClass {
 /// Distinct variants are intentional: NXR/Handoff MUST NOT be collapsed into
 /// [`Self::Direct`]. Callers that only speak Direct UDP sockets must call
 /// [`require_direct_xudp_landward`]. NXR landward uses [`XudpNxrAssociation`].
-/// Handoff landward remains fail-closed until a later PR.
+/// Handoff landward UDP is never opened on LINE (transfer to LANDING instead).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum XudpEgressCapability {
     /// Local Direct UDP sockets on the entry / LINE process.
@@ -160,7 +160,7 @@ pub fn require_nxr_xudp_landward(
 
 /// Returns `Ok(())` only when Handoff landward UDP is ready (currently never).
 ///
-/// Kept for symmetric call sites; always fail-closed until Handoff UDP lands.
+/// Kept for symmetric call sites; LINE never opens Handoff landward UDP (transfer path).
 ///
 /// # Errors
 ///

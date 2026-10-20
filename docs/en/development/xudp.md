@@ -17,7 +17,7 @@ See Issue [#254](https://github.com/jacek4yang/rust-reality/issues/254) for pin 
 | --- | --- |
 | Direct | Supported (local Direct UDP sockets) |
 | NXR | **Authorized** as a distinct egress capability ([ADR 0060](../../adr/0060-xudp-over-nxr-and-handoff.md)). Landward carrier: authenticated `FLAG_UDP` open + length-prefixed session-MAC frames over LINE→LANDING TCP (`protocol::nxr_udp`). LANDING owns UDP sockets. Vision→NXR session wiring continues in follow-up PRs; until wired, Vision still fails closed after authorization without opening Direct sockets. |
-| Handoff | **Authorized** as a distinct egress capability ([ADR 0060](../../adr/0060-xudp-over-nxr-and-handoff.md)); landward Handoff UDP forwarding is wired in follow-up PRs. Same no-silent-Direct rule. |
+| Handoff | **Authorized** as a distinct egress capability ([ADR 0060](../../adr/0060-xudp-over-nxr-and-handoff.md) Option B). Continuation v3 carries `SessionKind::Xudp` + sealed `HandoffPolicySnapshot`; LINE transfers before any client-visible Vision response; LANDING resumes TLS, owns UDP, and frames XUDP. Multi-destination sealed-policy Keep rewrites land in a follow-up PR (`allow_destination_rewrites = false` for now). Same no-silent-Direct rule. |
 | Block | Rejected by routing / authorization as usual |
 | Other (e.g. SOCKS5) | Fail closed (`Unsupported`) |
 
@@ -61,7 +61,8 @@ tests from earlier PRs:
 | UDP/443 policy | Without `allowUdp443`, UDP/443 fails closed; with it, XUDP may carry 443 |
 | Framing fuzz | `fuzz_decode_xudp_packet` remains in the wire-parser fuzz shard |
 | Route fail-closed | Block/unknown reject at authorize; NXR/Handoff are distinct capabilities and must not silently become Direct |
-| NXR UDP E2E (PR3) | rust↔rust and stock Xray Client → LINE → NXR LANDING → UDP echo; LANDING source `127.0.0.2` proof; multi-dest Keep; Block → zero packets; genuine Quinn+h3 UDP/443 via NXR; `allowUdp443` policy; Handoff still fail-closed |
+| NXR UDP E2E (PR3) | rust↔rust and stock Xray Client → LINE → NXR LANDING → UDP echo; LANDING source `127.0.0.2` proof; multi-dest Keep; Block → zero packets; genuine Quinn+h3 UDP/443 via NXR; `allowUdp443` policy |
+| Handoff XUDP continuation (PR4) | Continuation v3 `SessionKind` + policy snapshot; version mismatch fail-closed; KeyUpdate/seq/prefetch preserved; LANDING owns TLS+UDP; LINE thin splice; multi-dest sealed policy = PR5 |
 
 This is **not** native QUIC transport. QUIC/443 traffic, when permitted, is still
 UDP datagrams inside Vision/XUDP over the existing REALITY LINE.

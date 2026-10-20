@@ -32,7 +32,7 @@ use crate::{
     protocol::{
         handoff::{
             ContinuationState, HEADER_LEN, HandoffError, HandoffLandingKeys, HandoffPsk,
-            HandoffReplayCache, message_len_from_header, open_transfer, seal_transfer,
+            HandoffReplayCache, SessionKind, message_len_from_header, open_transfer, seal_transfer,
         },
         reality::tls13::{EstablishedTls, ExportedTlsState, resume_application_halves},
         vless::UserId,
@@ -558,18 +558,57 @@ impl HandoffLandingHandler {
         // Move both generation secrets into TLS state before touching the
         // network: a blob that cannot resume must not cost a destination
         // connection, and no duplicate secret representation survives.
-        let (exported_tls, user_id, destination, pending, prefetched, key_update_response_pending) =
-            state.into_parts().map_err(HandoffLandingError::Protocol)?;
+        let (
+            exported_tls,
+            user_id,
+            destination,
+            pending,
+            prefetched,
+            key_update_response_pending,
+            session_kind,
+            _inbound_tag,
+            policy,
+        ) = state.into_parts().map_err(HandoffLandingError::Protocol)?;
         let tls = resume_tls(exported_tls)?;
         let user_id = UserId::new(user_id);
         // Authentication state no longer owns session material once the
         // continuation has been consumed into these move-only parts.
         drop(authentication);
+
+        if session_kind == SessionKind::Xudp {
+            // XUDP: no TCP dial / destination side effect. TLS ownership is on
+            // LANDING; UDP sockets open only after transfer+auth succeeded.
+            let (reader_half, writer_half) = inbound.into_split();
+            let (client_reader, client_writer) = resume_application_halves(
+                reader_half,
+                pending,
+                writer_half,
+                tls,
+                key_update_response_pending,
+            );
+            let stats = crate::server::vision::run_resumed_xudp_session(
+                client_reader,
+                client_writer,
+                user_id,
+                prefetched,
+                policy,
+                self.io_timeout,
+            )
+            .await
+            .map_err(HandoffLandingError::Session)?;
+            return Ok(RelayStats::new(
+                stats.uplink_bytes(),
+                stats.downlink_bytes(),
+            ));
+        }
+
+        // TCP Vision resume (existing path).
         // The descriptor unit is reserved before connect(2) and outlives the
         // relay: the outbound socket closes before its unit is released. Both
         // permit slots are declared before the socket so either dial path
         // keeps that drop order. The egress registry and the default connector
         // each acquire and return their own correctly accounted unit.
+        let _ = policy;
         let _fd_permit;
         let _egress_permit;
         let destination = match &self.egress {
@@ -814,8 +853,8 @@ mod tests {
         protocol::{
             handoff::{
                 CONTINUATION_STATE_VERSION, ContinuationState, HEADER_LEN, HandoffError,
-                HandoffLandingKeys, HandoffPsk, HandoffReplayCache, message_len_from_header,
-                open_transfer, seal_transfer,
+                HandoffLandingKeys, HandoffPolicySnapshot, HandoffPsk, HandoffReplayCache,
+                SessionKind, message_len_from_header, open_transfer, seal_transfer,
             },
             reality::tls13::{
                 CipherSuite, ContentType, EstablishedTls, ExportedRecordState, Tls13RecordLayer,
@@ -1263,6 +1302,7 @@ mod tests {
         server_sequence: u64,
     ) -> ContinuationState {
         let suite = CipherSuite::ChaCha20Poly1305Sha256;
+        let policy = HandoffPolicySnapshot::tcp_placeholder(destination.clone());
         ContinuationState::new(
             suite,
             TrafficSecret::from_bytes(suite.hash(), &[0x11; 32]).expect("client secret"),
@@ -1270,10 +1310,13 @@ mod tests {
             TrafficSecret::from_bytes(suite.hash(), &[0x12; 32]).expect("server secret"),
             server_sequence,
             false,
+            SessionKind::Tcp,
             [0x33; 16],
+            "public-reality",
             destination,
             Vec::new(),
             Vec::new(),
+            policy,
         )
         .expect("test state must be valid")
     }
@@ -1330,7 +1373,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn sealed_v2_resume_preserves_generations_buffers_response_and_future_updates() {
+    async fn sealed_v3_resume_preserves_generations_buffers_response_and_future_updates() {
         for suite in [
             CipherSuite::Aes128GcmSha256,
             CipherSuite::Aes256GcmSha384,
@@ -1381,6 +1424,7 @@ mod tests {
                 .into_exported_state()
                 .expect("server export")
                 .into_parts();
+            let destination = Destination::new(Address::Ipv4(Ipv4Addr::LOCALHOST), 443);
             let state = ContinuationState::new(
                 suite,
                 client_secret,
@@ -1388,10 +1432,13 @@ mod tests {
                 server_secret,
                 server_sequence,
                 true,
+                SessionKind::Tcp,
                 *USER.as_bytes(),
-                Destination::new(Address::Ipv4(Ipv4Addr::LOCALHOST), 443),
+                "public-reality",
+                destination.clone(),
                 std::mem::take(&mut wire),
                 b"prefetched Vision bytes".to_vec(),
+                HandoffPolicySnapshot::tcp_placeholder(destination),
             )
             .expect("continuation");
             let mut message = Vec::new();
@@ -1404,18 +1451,31 @@ mod tests {
                 timestamp,
                 &mut message,
             )
-            .expect("sealed v2 transfer");
+            .expect("sealed v3 transfer");
             drop(state);
             let handler = test_landing_handler();
             let state = open_transfer(&message, &handler.keys, &handler.replay, timestamp, 30)
-                .expect("authenticated v2 transfer")
+                .expect("authenticated v3 transfer")
                 .into_state();
-            let (exported, user, destination, pending, prefetched, response_pending) =
-                state.into_parts().expect("move transferred state");
+            let (
+                exported,
+                user,
+                destination,
+                pending,
+                prefetched,
+                response_pending,
+                kind,
+                tag,
+                policy,
+            ) = state.into_parts().expect("move transferred state");
             assert_eq!(user, *USER.as_bytes());
             assert_eq!(destination.port(), 443);
             assert_eq!(prefetched, b"prefetched Vision bytes");
             assert!(response_pending);
+            assert_eq!(kind, SessionKind::Tcp);
+            assert_eq!(tag, "public-reality");
+            assert_eq!(policy.initial_destination().port(), 443);
+            assert!(!policy.allow_destination_rewrites());
             let tls = resume_tls(exported).expect("resume generations");
             let (mut peer, transport) = tokio::io::duplex(4096);
             let (read, write) = tokio::io::split(transport);

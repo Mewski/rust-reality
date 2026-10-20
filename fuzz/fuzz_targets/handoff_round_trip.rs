@@ -9,8 +9,8 @@ use arbitrary::{Arbitrary, Result, Unstructured};
 use libfuzzer_sys::fuzz_target;
 use rust_reality::protocol::{
     handoff::{
-        ContinuationState, HandoffLandingKeys, HandoffPsk, HandoffReplayCache, open_transfer,
-        seal_transfer,
+        ContinuationState, HandoffLandingKeys, HandoffPolicySnapshot, HandoffPsk,
+        HandoffReplayCache, SessionKind, open_transfer, seal_transfer,
     },
     reality::tls13::{CipherSuite, TrafficSecret},
     vless::{Address, Destination},
@@ -32,6 +32,7 @@ struct StateSpec {
     server_secret: [u8; 48],
     server_sequence: u64,
     key_update_response_pending: bool,
+    session_kind: SessionKind,
     user_id: [u8; 16],
     destination: Destination,
     pending: Vec<u8>,
@@ -73,6 +74,11 @@ impl<'a> Arbitrary<'a> for StateSpec {
             // or one; two reaches the rejection path.
             server_sequence: u64::from(u.arbitrary::<u8>()? % 3),
             key_update_response_pending: u.arbitrary()?,
+            session_kind: if u.arbitrary::<bool>()? {
+                SessionKind::Tcp
+            } else {
+                SessionKind::Xudp
+            },
             user_id: u.arbitrary()?,
             destination: Destination::new(address, port),
             pending,
@@ -105,6 +111,7 @@ fn assert_states_equal(opened: &ContinuationState, expected: &StateSpec) {
         opened.key_update_response_pending(),
         expected.key_update_response_pending
     );
+    assert_eq!(opened.session_kind(), expected.session_kind, "session kind diverged");
     assert_eq!(opened.user_id(), &expected.user_id, "user id diverged");
     assert_eq!(
         opened.destination(),
@@ -136,6 +143,10 @@ fuzz_target!(|input: &[u8]| {
     let Some(server_traffic_secret) = traffic_secret(spec.suite, &spec.server_secret) else {
         return;
     };
+    let policy = match spec.session_kind {
+        SessionKind::Tcp => HandoffPolicySnapshot::tcp_placeholder(spec.destination.clone()),
+        SessionKind::Xudp => HandoffPolicySnapshot::xudp_initial(spec.destination.clone()),
+    };
     let Ok(state) = ContinuationState::new(
         spec.suite,
         client_traffic_secret,
@@ -143,10 +154,13 @@ fuzz_target!(|input: &[u8]| {
         server_traffic_secret,
         spec.server_sequence,
         spec.key_update_response_pending,
+        spec.session_kind,
         spec.user_id,
+        "fuzz-inbound",
         spec.destination.clone(),
         spec.pending.clone(),
         spec.prefetched.clone(),
+        policy,
     ) else {
         return;
     };
