@@ -34,7 +34,11 @@ criteria.
 ## Consequences
 
 - AGENTS.md §6 states the directional table as binding law.
-- `tests/xudp_stock_xray_interop.rs` keeps Xray→rust-reality as a mandatory
-  (when `XRAY_BIN` is set) path; rust-reality→Xray stays ignored historical.
+- `tests/xudp_stock_xray_interop.rs` marks Xray→rust-reality
+  (`stock_xray_client_udp_echo_via_rust_reality_entry`) `#[ignore]` so default
+  nextest cannot green-pass a missing fixture; Exact-head Native pins stock
+  Xray, sets `XRAY_BIN`, and runs that one test with `--ignored --exact`,
+  failing closed on skip/zero cases. rust-reality→Xray stays ignored historical
+  and is never part of the mandatory filter.
 - Optimizations that preserve Xray-client ingress remain in scope; work whose
   only purpose is rust-reality→Xray server fidelity is out of scope.
