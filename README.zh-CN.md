@@ -189,8 +189,9 @@ relay。生命周期、热路径拓扑、描述符预算模型和可观测事件
 回退，在验证主机上没有实测优势——记录 AEAD 在每个档位都于运行时调度到 AES
 硬件），以及 `linux-aarch64-generic`（ARMv8.0 含 neon，在 ARM runner 上原生
 构建并通过冒烟测试）。不确定 CPU 能力时选择基线包，再根据部署用户空间选择
-GNU 或 musl。公网入站不支持纯 VLESS、仅 TLS
-的 VLESS、WebSocket、QUIC、UDP 代理或非 Vision flow。NXR 不是公网协议，一次
+GNU 或 musl。公网入站不支持纯 VLESS、仅 TLS 的 VLESS、WebSocket、原生 QUIC/MASQUE、
+或非 Vision flow。UDP 仅作为 REALITY + Vision 内的 **XUDP** 承载
+（SOCKS5 UDP ASSOCIATE / Mux `0x03`），不是裸 UDP 代理入站。NXR 不是公网协议，一次
 认证请求完成后也不会加密后续载荷。公网协议带有使用未经修改的 Xray-core
 26.7.28 客户端的端到端互操作门禁；部署者仍须根据自己的 VPS 审查威胁模型、
 防火墙、REALITY 目标和资源限制。

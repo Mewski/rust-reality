@@ -126,3 +126,12 @@ gate (`xudp-adversarial` evidence). It proves:
 
 Rust Client → stock Xray Server remains **not required** (ADR 0059).
 
+## Quantitative UDP performance (Q4)
+
+`tests/xudp_udp_performance.rs` records loopback single-datagram RTT through
+rust↔rust SOCKS5 UDP ASSOCIATE → XUDP, plus an A/A median ratio as noise
+characterisation. Exact-head Native may retain the receipt. These numbers are
+**not** Internet throughput, **not** a capacity claim, and **not** a universal
+speedup claim. Optional stock Xray Client→RR samples (when `XRAY_BIN` is set in
+other suites) remain diagnostic; rust-reality Client→Xray Server is never required.
+

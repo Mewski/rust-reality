@@ -37,6 +37,10 @@ This publication rebuilds from final integrated `main` after XUDP PRs
   `client_multi_line_e2e`, `client_socks5_udp_e2e`.
 - Native qualification step for the unified-client live-process E2E suite on
   the exact proposed source.
+- Mandatory Exact-head Native gates: stock Xray Client→RR XUDP; rust↔rust
+  UDP/443 + genuine HTTP/3 over XUDP; adversarial XUDP lifecycle/routing;
+  quantitative loopback UDP RTT with A/A noise characterisation (no universal
+  speedup claim).
 
 ### Changed
 
@@ -52,15 +56,18 @@ This publication rebuilds from final integrated `main` after XUDP PRs
   retune ships here.
 - **#291:** Historical rollback timer verification is production operations
   and out of scope for this publication.
-- Stock-Xray as a UDP/XUDP peer harness remains desirable follow-on evidence;
-  first-party ASSOCIATE↔Direct echo and framing golden vectors are the gate.
+- Stock Xray Client → rust-reality Server XUDP is a **mandatory** Exact-head
+  Native gate (ADR 0059). rust-reality Client → stock Xray Server remains
+  **not required** and is not a release gate.
 
 ### Performance note
 
-No new setup CPS or throughput campaign is claimed for v2.1.0. Published
-comparator tables remain the historical v2.0.x evidence set. Client path
-correctness is gated by live-process E2E and existing server Native / Frozen
-non-regression; do not read retained ratios as a client-vs-Xray product claim.
+No universal speedup claim for v2.1.0. Published TCP comparator tables remain
+the historical v2.0.x evidence set (protected-path non-regression continues via
+Exact-head Native and Frozen). UDP evidence is **honest loopback**
+single-datagram RTT with A/A noise characterisation — not Internet throughput
+and not a capacity claim. Optional stock Xray Client→RR UDP RTT samples are
+diagnostic only.
 
 ## [2.0.4] - 2026-10-18
 

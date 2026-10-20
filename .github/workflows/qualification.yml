@@ -281,6 +281,46 @@ jobs:
             printf 'status=%s\n' "$status"
             grep -E 'test result:| PASS$' "$LOG" | tail -n40
           } | tee "$Q/xudp-adversarial/receipt.txt"
+      - name: Quantitative UDP/XUDP loopback RTT (A/A noise)
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          # FINAL MISSION Q4: honest loopback RTT + A/A noise. Not a win claim.
+          mkdir -p "$Q/xudp-udp-perf"
+          {
+            printf 'source=%s\nrun=%s\nattempt=%s\n' \
+              "$HEAD_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf 'gate=quantitative-xudp-udp-rtt-aa\n'
+            printf 'require=loopback RTT receipt; no universal speedup claim\n'
+          } | tee "$Q/xudp-udp-perf/identity.txt"
+          if ! command -v openssl >/dev/null 2>&1; then
+            test -n "${OPENSSL_BIN:-}"
+            test -x "$OPENSSL_BIN"
+            export PATH="$(dirname "$OPENSSL_BIN"):$PATH"
+          fi
+          LOG="$Q/xudp-udp-perf/cargo-test.log"
+          set +e
+          cargo test --locked --test xudp_udp_performance -- --nocapture 2>&1 | tee "$LOG"
+          status=${PIPESTATUS[0]}
+          set -e
+          if ! grep -E 'test result: ok\.' "$LOG"; then
+            printf '%s\n' 'FAIL: UDP performance suite did not report ok' >&2
+            exit 1
+          fi
+          if grep -E 'test result:.*[^0-9]0 passed' "$LOG"; then
+            printf '%s\n' 'FAIL: UDP performance suite passed zero cases' >&2
+            exit 1
+          fi
+          if ! grep -F 'xudp_udp_rtt_aa' "$LOG"; then
+            printf '%s\n' 'FAIL: missing A/A RTT receipt line' >&2
+            exit 1
+          fi
+          test "$status" -eq 0
+          {
+            printf 'verdict=PASS\n'
+            printf 'status=%s\n' "$status"
+            grep -E 'test result:|xudp_udp_rtt' "$LOG" | tail -n40
+          } | tee "$Q/xudp-udp-perf/receipt.txt"
       - name: Unmodified Xray REALITY and Vision interoperability
         timeout-minutes: 5
         run: |
@@ -330,6 +370,8 @@ jobs:
               'quic-h3-udp443/cargo-test.log',
               'xudp-adversarial/identity.txt', 'xudp-adversarial/receipt.txt',
               'xudp-adversarial/cargo-test.log',
+              'xudp-udp-perf/identity.txt', 'xudp-udp-perf/receipt.txt',
+              'xudp-udp-perf/cargo-test.log',
               'interop/summary.json', 'interop/environment.json', 'interop/completion.json',
               'interop/certificate-san.txt',
               'pressure/pressure-result.json', 'pressure/gate-summary.json',

@@ -229,9 +229,10 @@ neon, built and smoke-tested natively on ARM runners). Use a baseline archive
 when CPU support is unknown and select GNU versus musl for the deployment
 userspace.
 
-The public
-inbound does not support plain VLESS, TLS-only VLESS, WebSocket, QUIC, UDP
-proxying, or non-Vision flow. NXR is not a public protocol and does not
+The public inbound does not support plain VLESS, TLS-only VLESS, WebSocket,
+native QUIC/MASQUE, or non-Vision flow. UDP is carried only as **XUDP** inside
+REALITY + Vision (SOCKS5 UDP ASSOCIATE / Mux `0x03`); it is not a raw UDP
+proxy inbound. NXR is not a public protocol and does not
 encrypt payload after its one-time authenticated request. The public protocol
 carries an end-to-end interoperability gate using an unmodified Xray-core
 26.7.28 client; operators must still review the threat model, firewall
