@@ -8,9 +8,9 @@
 //!
 //! Also covered when green:
 //! 1. rust-reality entry ← stock Xray SOCKS(udp) client (flow vision-udp443)
-//! 2. QUIC-shaped datagram to UDP/443 via XUDP with `allowUdp443` (no TCP CONNECT)
-//!    on the rust↔rust path when `:443` bind is permitted (may skip without
-//!    privilege to bind `:443`; that skip is not a Native Xray-ingress claim)
+//! 2. QUIC-shaped / genuine HTTP/3 over UDP/443 via XUDP with `allowUdp443`
+//!    (no TCP CONNECT) — mandatory Exact-head Native gate lives in
+//!    `tests/quic_h3_udp443_e2e.rs` (fail-closed without CAP_NET_BIND_SERVICE).
 //!
 //! Historical only (NOT a release gate): rust-reality client → stock Xray server
 //! remains `#[ignore]`. Not native QUIC transport. See `docs/en/development/xudp.md`.
@@ -545,18 +545,14 @@ fn rust_reality_client_udp_echo_via_stock_xray_server() {
 }
 
 #[test]
+#[ignore = "superseded by tests/quic_h3_udp443_e2e.rs mandatory Native gate; kept as thin datagram probe"]
 fn quic_shaped_udp_443_via_xudp_without_tcp_connect() {
-    let Some(_xray) = xray_bin() else {
-        eprintln!("skip: XRAY_BIN not set (UDP/443 probe shares Native fixture lane)");
-        return;
-    };
-    let echo = match UdpSocket::bind("127.0.0.1:443") {
-        Ok(sock) => sock,
-        Err(err) => {
-            eprintln!("skip: cannot bind 127.0.0.1:443 ({err})");
-            return;
-        }
-    };
+    // Fail closed: never green-pass a missing privileged bind.
+    let echo = UdpSocket::bind("127.0.0.1:443").unwrap_or_else(|err| {
+        panic!(
+            "cannot bind 127.0.0.1:443 ({err}); unprivileged skip is FAIL — see quic_h3_udp443_e2e"
+        )
+    });
     assert_eq!(echo.local_addr().unwrap().port(), 443);
     let echo_clone = echo.try_clone().unwrap();
     let echo_thread = thread::spawn(move || {

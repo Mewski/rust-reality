@@ -192,6 +192,60 @@ jobs:
             grep -E 'test result:' "$LOG" | tail -n1
             grep -F 'xudp_udp_rtt_ms' "$LOG" || true
           } | tee "$Q/stock-xray-xudp/receipt.txt"
+      - name: Mandatory rust-to-rust UDP/443 and genuine HTTP/3 over XUDP
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          # AGENTS.md §6 / ADR 0059: UDP/443 + genuine HTTP/3 via XUDP are
+          # release gates. Unprivileged bind skip MUST fail closed.
+          mkdir -p "$Q/quic-h3-udp443"
+          {
+            printf 'source=%s\nrun=%s\nattempt=%s\n' \
+              "$HEAD_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf 'gate=mandatory-rust-udp443-http3-xudp\n'
+            printf 'require=CAP_NET_BIND_SERVICE on test binary\n'
+          } | tee "$Q/quic-h3-udp443/identity.txt"
+          if ! command -v openssl >/dev/null 2>&1; then
+            test -n "${OPENSSL_BIN:-}"
+            test -x "$OPENSSL_BIN"
+            export PATH="$(dirname "$OPENSSL_BIN"):$PATH"
+          fi
+          sudo apt-get install -y --no-install-recommends libcap2-bin >/dev/null
+          cargo test --locked --test quic_h3_udp443_e2e --no-run
+          mapfile -t BINS < <(find target/debug/deps -maxdepth 1 -type f -name 'quic_h3_udp443_e2e-*' ! -name '*.d' | sort)
+          test "${#BINS[@]}" -ge 1
+          BIN="${BINS[-1]}"
+          test -x "$BIN"
+          sudo setcap 'cap_net_bind_service=+ep' "$BIN"
+          getcap "$BIN" | tee -a "$Q/quic-h3-udp443/identity.txt"
+          export RR_REQUIRE_UDP443=1
+          LOG="$Q/quic-h3-udp443/cargo-test.log"
+          : > "$LOG"
+          # Invoke the capability-bearing binary directly — a fresh
+          # `cargo test` rebuild would drop setcap.
+          run_one() {
+            local name="$1"
+            set +e
+            "$BIN" --exact "$name" --nocapture --ignored 2>&1 | tee -a "$LOG"
+            local status=${PIPESTATUS[0]}
+            set -e
+            if ! grep -F "test $name ... ok" "$LOG"; then
+              printf '%s\n' "FAIL: mandatory UDP/443 gate test $name did not report ok" >&2
+              exit 1
+            fi
+            test "$status" -eq 0
+          }
+          run_one udp443_echo_via_xudp_with_allow_udp443
+          run_one udp443_rejected_without_allow_udp443_before_destination
+          run_one genuine_http3_over_xudp_udp443_no_tcp_fallback
+          if grep -E 'skip: cannot bind 127.0.0.1:443' "$LOG"; then
+            printf '%s\n' 'FAIL: UDP/443 gate skipped privileged bind' >&2
+            exit 1
+          fi
+          {
+            printf 'verdict=PASS\n'
+            grep -E 'test result:|genuine_http3|udp443_|ALPN|h3-origin handled' "$LOG" | tail -n40
+          } | tee "$Q/quic-h3-udp443/receipt.txt"
       - name: Unmodified Xray REALITY and Vision interoperability
         timeout-minutes: 5
         run: |
@@ -237,6 +291,8 @@ jobs:
               'frozen/binary/rust-reality',
               'stock-xray-xudp/identity.txt', 'stock-xray-xudp/receipt.txt',
               'stock-xray-xudp/cargo-test.log',
+              'quic-h3-udp443/identity.txt', 'quic-h3-udp443/receipt.txt',
+              'quic-h3-udp443/cargo-test.log',
               'interop/summary.json', 'interop/environment.json', 'interop/completion.json',
               'interop/certificate-san.txt',
               'pressure/pressure-result.json', 'pressure/gate-summary.json',

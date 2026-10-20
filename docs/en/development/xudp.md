@@ -96,12 +96,14 @@ Directional contract (AGENTS.md §6, ADR 0059):
   around ClientHello fixes) are **not** mandatory acceptance criteria.
 - **QUIC/HTTP3 UDP/443 (rust↔rust):** not native QUIC transport on the REALITY
   LINE. XUDP carries UDP datagrams; `allowUdp443` gates destination port 443
-  (stock vision-udp443 policy). Mandatory verification uses SOCKS5 UDP
-  ASSOCIATE only (no TCP CONNECT). Binding `127.0.0.1:443` needs privileges —
-  unprivileged sandboxes **skip** (fail-closed, not a green pass);
-  Native/privileged runners SHOULD bind and exercise. Full browser-grade HTTP/3
-  is out of scope for this gate; the proof is XUDP delivery to UDP/443 without
-  TCP fallback.
+  (stock vision-udp443 policy). Exact-head Native grants `CAP_NET_BIND_SERVICE`
+  to `tests/quic_h3_udp443_e2e.rs`, sets `RR_REQUIRE_UDP443=1`, and runs:
+  (1) positive UDP/443 echo via SOCKS5 UDP ASSOCIATE, (2) negative policy
+  without `allowUdp443`, (3) genuine Quinn+h3 client → SOCKS5 UDP ASSOCIATE →
+  rust-reality Client → REALITY+Vision+XUDP → rust-reality Server → Direct
+  UDP/443 → independent h3 origin (ALPN `h3`, multi request/response, short
+  idle, TCP watchdog on `:443` must see zero accepts). Unprivileged bind is
+  **FAIL**, never a green skip. Quinn/h3 are **dev-dependencies only**.
 - GlobalID affinity is **process-wide** (`process_xudp_global_map`). Payload
   capped at stock `buf.Size - 666` (7526); encode is failure-atomic.
   Association limits: `XUDP_MAX_ASSOCIATIONS`, idle expire, FD budgets;
