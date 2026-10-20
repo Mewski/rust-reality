@@ -55,8 +55,103 @@ use crate::crypto::{EphemeralX25519Key, StaticX25519Key};
 pub const HANDOFF_PROTOCOL_VERSION: u8 = 1;
 
 /// Current continuation-state blob version, carried in the header and repeated
-/// inside the sealed blob. Version 1 is rejected; it cannot retain KeyUpdate state.
-pub const CONTINUATION_STATE_VERSION: u8 = 2;
+/// inside the sealed blob.
+///
+/// - Version 1: rejected (cannot retain KeyUpdate state).
+/// - Version 2: TCP-only continuation without session-kind / policy snapshot;
+///   rejected by this build (no silent reinterpret as XUDP).
+/// - Version 3: explicit [`SessionKind`] + inbound tag + [`HandoffPolicySnapshot`].
+pub const CONTINUATION_STATE_VERSION: u8 = 3;
+
+/// Maximum inbound tag bytes sealed into a continuation (operator tag length).
+pub const MAX_INBOUND_TAG_LEN: usize = 64;
+
+/// Maximum sealed policy-snapshot payload (ADR 0060 Option B foundation).
+pub const MAX_POLICY_SNAPSHOT_LEN: usize = 1024;
+
+/// Policy snapshot format version inside the continuation blob.
+pub const HANDOFF_POLICY_SNAPSHOT_VERSION: u8 = 1;
+
+/// Vision session kind transferred with the TLS continuation (ADR 0060).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum SessionKind {
+    /// Ordinary Vision TCP relay after LANDING resume.
+    Tcp = 0,
+    /// Vision XUDP (Mux); LANDING owns TLS decrypt and UDP sockets.
+    Xudp = 1,
+}
+
+impl SessionKind {
+    #[must_use]
+    pub const fn from_wire(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Tcp),
+            1 => Some(Self::Xudp),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn wire(self) -> u8 {
+        self as u8
+    }
+}
+
+/// Session-bound UDP authorization sealed at Handoff transfer (ADR 0060 Option B).
+///
+/// PR4 foundation: LANDING may serve the initial destination; Keep rewrites to a
+/// new destination fail closed until PR5 widens `allow_destination_rewrites`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HandoffPolicySnapshot {
+    initial_destination: Destination,
+    allow_destination_rewrites: bool,
+}
+
+impl HandoffPolicySnapshot {
+    #[must_use]
+    pub fn tcp_placeholder(destination: Destination) -> Self {
+        Self {
+            initial_destination: destination,
+            allow_destination_rewrites: false,
+        }
+    }
+
+    #[must_use]
+    pub fn xudp_initial(destination: Destination) -> Self {
+        Self {
+            initial_destination: destination,
+            allow_destination_rewrites: false,
+        }
+    }
+
+    #[must_use]
+    pub const fn initial_destination(&self) -> &Destination {
+        &self.initial_destination
+    }
+
+    #[must_use]
+    pub const fn allow_destination_rewrites(&self) -> bool {
+        self.allow_destination_rewrites
+    }
+
+    /// Authorize one XUDP New/Keep destination against this snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Deny when the destination differs from the sealed initial target and
+    /// rewrites are not enabled.
+    pub fn authorize_udp_destination(&self, destination: &Destination) -> Result<(), HandoffError> {
+        if destination == &self.initial_destination {
+            return Ok(());
+        }
+        if self.allow_destination_rewrites {
+            // PR5 will evaluate a richer compiled snapshot here.
+            return Ok(());
+        }
+        Err(HandoffError::State)
+    }
+}
 
 const MAGIC: [u8; 4] = *b"HND1";
 
@@ -255,11 +350,17 @@ pub struct ContinuationState {
     server_sequence: u64,
     #[zeroize(skip)]
     key_update_response_pending: bool,
+    #[zeroize(skip)]
+    session_kind: SessionKind,
     user_id: [u8; USER_ID_LEN],
+    #[zeroize(skip)]
+    inbound_tag: String,
     #[zeroize(skip)]
     destination: Destination,
     pending_ciphertext: Vec<u8>,
     prefetched_plaintext: Vec<u8>,
+    #[zeroize(skip)]
+    policy: HandoffPolicySnapshot,
 }
 
 /// The move-only parts needed to install one verified continuation.
@@ -270,6 +371,9 @@ pub type ContinuationParts = (
     Vec<u8>,
     Vec<u8>,
     bool,
+    SessionKind,
+    String,
+    HandoffPolicySnapshot,
 );
 
 impl ContinuationState {
@@ -287,19 +391,27 @@ impl ContinuationState {
         server_traffic_secret: TrafficSecret,
         server_sequence: u64,
         key_update_response_pending: bool,
+        session_kind: SessionKind,
         user_id: [u8; USER_ID_LEN],
+        inbound_tag: impl Into<String>,
         destination: Destination,
         pending_ciphertext: Vec<u8>,
         prefetched_plaintext: Vec<u8>,
+        policy: HandoffPolicySnapshot,
     ) -> Result<Self, HandoffError> {
         if client_traffic_secret.algorithm() != suite.hash()
             || server_traffic_secret.algorithm() != suite.hash()
         {
             return Err(HandoffError::State);
         }
-        if pending_ciphertext.len() > MAX_PENDING_CIPHERTEXT_LEN
+        let inbound_tag = inbound_tag.into();
+        if inbound_tag.len() > MAX_INBOUND_TAG_LEN
+            || pending_ciphertext.len() > MAX_PENDING_CIPHERTEXT_LEN
             || prefetched_plaintext.len() > MAX_PREFETCHED_PLAINTEXT_LEN
         {
+            return Err(HandoffError::State);
+        }
+        if !inbound_tag.is_ascii() {
             return Err(HandoffError::State);
         }
         Ok(Self {
@@ -309,10 +421,13 @@ impl ContinuationState {
             client_sequence,
             server_sequence,
             key_update_response_pending,
+            session_kind,
             user_id,
+            inbound_tag,
             destination,
             pending_ciphertext,
             prefetched_plaintext,
+            policy,
         })
     }
 
@@ -350,6 +465,24 @@ impl ContinuationState {
     #[must_use]
     pub const fn key_update_response_pending(&self) -> bool {
         self.key_update_response_pending
+    }
+
+    /// Returns whether this continuation resumes TCP Vision or XUDP.
+    #[must_use]
+    pub const fn session_kind(&self) -> SessionKind {
+        self.session_kind
+    }
+
+    /// Returns the LINE inbound tag sealed for LANDING authorization context.
+    #[must_use]
+    pub fn inbound_tag(&self) -> &str {
+        &self.inbound_tag
+    }
+
+    /// Returns the sealed UDP policy snapshot (Option B foundation).
+    #[must_use]
+    pub const fn policy(&self) -> &HandoffPolicySnapshot {
+        &self.policy
     }
 
     /// Returns the session's VLESS user identifier.
@@ -406,6 +539,14 @@ impl ContinuationState {
             &mut self.destination,
             Destination::new(Address::Ipv4(Ipv4Addr::UNSPECIFIED), 0),
         );
+        let inbound_tag = std::mem::take(&mut self.inbound_tag);
+        let policy = std::mem::replace(
+            &mut self.policy,
+            HandoffPolicySnapshot::tcp_placeholder(Destination::new(
+                Address::Ipv4(Ipv4Addr::UNSPECIFIED),
+                0,
+            )),
+        );
         Ok((
             tls,
             self.user_id,
@@ -413,6 +554,9 @@ impl ContinuationState {
             std::mem::take(&mut self.pending_ciphertext),
             std::mem::take(&mut self.prefetched_plaintext),
             self.key_update_response_pending,
+            self.session_kind,
+            inbound_tag,
+            policy,
         ))
     }
 }
@@ -428,6 +572,8 @@ impl fmt::Debug for ContinuationState {
                 "key_update_response_pending",
                 &self.key_update_response_pending,
             )
+            .field("session_kind", &self.session_kind)
+            .field("inbound_tag", &self.inbound_tag)
             .field("pending_ciphertext_len", &self.pending_ciphertext.len())
             .field("prefetched_plaintext_len", &self.prefetched_plaintext.len())
             .finish_non_exhaustive()
@@ -975,15 +1121,20 @@ fn derive_aead(
 
 fn encode_blob(state: &ContinuationState, output: &mut Vec<u8>) -> Result<(), HandoffError> {
     let address_length = bounded_address_length(state.destination())?;
+    let policy_len = encoded_policy_len(state.policy())?;
+    let inbound_len = state.inbound_tag().len();
     let total = 1_usize
         .checked_add(2)
         .and_then(|length| length.checked_add(2 * state.suite().hash().output_len()))
         .and_then(|length| length.checked_add(2 * 8))
-        .and_then(|length| length.checked_add(1))
+        .and_then(|length| length.checked_add(1)) // key_update
+        .and_then(|length| length.checked_add(1)) // session_kind
         .and_then(|length| length.checked_add(USER_ID_LEN))
+        .and_then(|length| length.checked_add(1 + inbound_len)) // inbound tag
         .and_then(|length| length.checked_add(1 + 2 + address_length + 2))
         .and_then(|length| length.checked_add(4 + state.pending_ciphertext().len()))
         .and_then(|length| length.checked_add(4 + state.prefetched_plaintext().len()))
+        .and_then(|length| length.checked_add(4 + policy_len))
         .filter(|length| *length <= MAX_BLOB_LEN)
         .ok_or(HandoffError::Length)?;
     output.clear();
@@ -997,11 +1148,49 @@ fn encode_blob(state: &ContinuationState, output: &mut Vec<u8>) -> Result<(), Ha
     output.extend_from_slice(&state.client_sequence().to_be_bytes());
     output.extend_from_slice(&state.server_sequence().to_be_bytes());
     output.push(u8::from(state.key_update_response_pending()));
+    output.push(state.session_kind().wire());
     output.extend_from_slice(state.user_id());
+    encode_short_bytes(state.inbound_tag().as_bytes(), output)?;
     encode_address(state.destination(), output);
     output.extend_from_slice(&state.destination().port().to_be_bytes());
     encode_bounded_bytes(state.pending_ciphertext(), output);
     encode_bounded_bytes(state.prefetched_plaintext(), output);
+    encode_policy_snapshot(state.policy(), output)?;
+    Ok(())
+}
+
+fn encoded_policy_len(policy: &HandoffPolicySnapshot) -> Result<usize, HandoffError> {
+    let address_length = bounded_address_length(policy.initial_destination())?;
+    1_usize // snapshot version
+        .checked_add(1) // allow_rewrites
+        .and_then(|length| length.checked_add(1 + 2 + address_length + 2))
+        .filter(|length| *length <= MAX_POLICY_SNAPSHOT_LEN)
+        .ok_or(HandoffError::Length)
+}
+
+fn encode_short_bytes(bytes: &[u8], output: &mut Vec<u8>) -> Result<(), HandoffError> {
+    if bytes.len() > MAX_INBOUND_TAG_LEN {
+        return Err(HandoffError::State);
+    }
+    let length = u8::try_from(bytes.len()).map_err(|_| HandoffError::State)?;
+    output.push(length);
+    output.extend_from_slice(bytes);
+    Ok(())
+}
+
+fn encode_policy_snapshot(
+    policy: &HandoffPolicySnapshot,
+    output: &mut Vec<u8>,
+) -> Result<(), HandoffError> {
+    let mut body = Vec::new();
+    body.push(HANDOFF_POLICY_SNAPSHOT_VERSION);
+    body.push(u8::from(policy.allow_destination_rewrites()));
+    encode_address(policy.initial_destination(), &mut body);
+    body.extend_from_slice(&policy.initial_destination().port().to_be_bytes());
+    if body.len() > MAX_POLICY_SNAPSHOT_LEN {
+        return Err(HandoffError::Length);
+    }
+    encode_bounded_bytes(&body, output);
     Ok(())
 }
 
@@ -1038,7 +1227,9 @@ fn encode_bounded_bytes(bytes: &[u8], output: &mut Vec<u8>) {
 
 fn decode_blob(blob: &[u8]) -> Result<ContinuationState, HandoffError> {
     let mut cursor = BlobCursor::new(blob);
-    if cursor.u8()? != CONTINUATION_STATE_VERSION {
+    let version = cursor.u8()?;
+    // Reject legacy blobs explicitly: never reinterpret v1/v2 as v3 fields.
+    if version != CONTINUATION_STATE_VERSION {
         return Err(HandoffError::State);
     }
     let suite = CipherSuite::from_wire(cursor.u16()?).ok_or(HandoffError::State)?;
@@ -1051,13 +1242,16 @@ fn decode_blob(blob: &[u8]) -> Result<ContinuationState, HandoffError> {
         1 => true,
         _ => return Err(HandoffError::State),
     };
+    let session_kind = SessionKind::from_wire(cursor.u8()?).ok_or(HandoffError::State)?;
     let user_id: [u8; USER_ID_LEN] = cursor
         .take(USER_ID_LEN)?
         .try_into()
         .map_err(|_| HandoffError::State)?;
+    let inbound_tag = decode_short_string(&mut cursor)?;
     let destination = decode_destination(&mut cursor)?;
     let pending_ciphertext = decode_bounded_bytes(&mut cursor, MAX_PENDING_CIPHERTEXT_LEN)?;
     let prefetched_plaintext = decode_bounded_bytes(&mut cursor, MAX_PREFETCHED_PLAINTEXT_LEN)?;
+    let policy = decode_policy_snapshot(&mut cursor)?;
     if cursor.remaining() != 0 {
         return Err(HandoffError::State);
     }
@@ -1068,11 +1262,49 @@ fn decode_blob(blob: &[u8]) -> Result<ContinuationState, HandoffError> {
         server_traffic_secret,
         server_sequence,
         key_update_response_pending,
+        session_kind,
         user_id,
+        inbound_tag,
         destination,
         pending_ciphertext,
         prefetched_plaintext,
+        policy,
     )
+}
+
+fn decode_short_string(cursor: &mut BlobCursor<'_>) -> Result<String, HandoffError> {
+    let length = usize::from(cursor.u8()?);
+    if length > MAX_INBOUND_TAG_LEN {
+        return Err(HandoffError::State);
+    }
+    let bytes = cursor.take(length)?;
+    if !bytes.is_ascii() {
+        return Err(HandoffError::State);
+    }
+    String::from_utf8(bytes.to_vec()).map_err(|_| HandoffError::State)
+}
+
+fn decode_policy_snapshot(
+    cursor: &mut BlobCursor<'_>,
+) -> Result<HandoffPolicySnapshot, HandoffError> {
+    let body = decode_bounded_bytes(cursor, MAX_POLICY_SNAPSHOT_LEN)?;
+    let mut inner = BlobCursor::new(&body);
+    if inner.u8()? != HANDOFF_POLICY_SNAPSHOT_VERSION {
+        return Err(HandoffError::State);
+    }
+    let allow_destination_rewrites = match inner.u8()? {
+        0 => false,
+        1 => true,
+        _ => return Err(HandoffError::State),
+    };
+    let initial_destination = decode_destination(&mut inner)?;
+    if inner.remaining() != 0 {
+        return Err(HandoffError::State);
+    }
+    Ok(HandoffPolicySnapshot {
+        initial_destination,
+        allow_destination_rewrites,
+    })
 }
 
 fn decode_traffic_secret(
@@ -1256,15 +1488,15 @@ mod tests {
         aead::{AeadInOut, array::Array},
     };
 
-    use sha2::{Digest as _, Sha256};
     use x25519_dalek::{PublicKey, StaticSecret};
 
     use super::{
         CONTINUATION_STATE_VERSION, ContinuationState, HANDOFF_PROTOCOL_VERSION, HEADER_LEN,
-        HandoffError, HandoffLandingKeys, HandoffPsk, HandoffReplayCache, MAX_BLOB_LEN,
-        MAX_MESSAGE_LEN, MAX_PENDING_CIPHERTEXT_LEN, MAX_PREFETCHED_PLAINTEXT_LEN,
-        MAX_PREVIOUS_KEYS, MonotonicInstant, NONCE_LEN, StaticX25519Key, decode_blob, encode_blob,
-        message_len_from_header, open_transfer, seal_transfer,
+        HandoffError, HandoffLandingKeys, HandoffPolicySnapshot, HandoffPsk, HandoffReplayCache,
+        MAX_BLOB_LEN, MAX_MESSAGE_LEN, MAX_PENDING_CIPHERTEXT_LEN, MAX_PREFETCHED_PLAINTEXT_LEN,
+        MAX_PREVIOUS_KEYS, MonotonicInstant, NONCE_LEN, STATE_VERSION_OFFSET, SessionKind,
+        StaticX25519Key, decode_blob, encode_blob, message_len_from_header, open_transfer,
+        seal_transfer,
     };
     use crate::protocol::reality::tls13::{CipherSuite, HashAlgorithm, TrafficSecret};
     use crate::protocol::vless::{Address, Destination};
@@ -1298,10 +1530,16 @@ mod tests {
             TrafficSecret::from_bytes(suite.hash(), &[0x12; 32]).expect("server secret"),
             server_sequence,
             true,
+            SessionKind::Tcp,
             [0x33; 16],
+            "public-reality",
             Destination::new(Address::Domain("example.com".to_owned()), 443),
             pending,
             prefetched,
+            HandoffPolicySnapshot::tcp_placeholder(Destination::new(
+                Address::Domain("example.com".to_owned()),
+                443,
+            )),
         )
         .expect("test state must be valid")
     }
@@ -1351,8 +1589,11 @@ mod tests {
             opened.key_update_response_pending(),
             expected.key_update_response_pending()
         );
+        assert_eq!(opened.session_kind(), expected.session_kind());
+        assert_eq!(opened.inbound_tag(), expected.inbound_tag());
         assert_eq!(opened.user_id(), expected.user_id());
         assert_eq!(opened.destination(), expected.destination());
+        assert_eq!(opened.policy(), expected.policy());
         assert_eq!(opened.pending_ciphertext(), expected.pending_ciphertext());
         assert_eq!(
             opened.prefetched_plaintext(),
@@ -1541,7 +1782,7 @@ mod tests {
         let state = test_state(Vec::new(), Vec::new());
         let message = seal(&state, &psk, &landing_public);
 
-        for (offset, versions) in [(4_usize, [0, 2, 255]), (5, [0, 1, 3])] {
+        for (offset, versions) in [(4_usize, [0, 2, 255]), (5, [0, 1, 2])] {
             for version in versions {
                 let mut tampered = message.clone();
                 tampered[offset] = version;
@@ -1558,7 +1799,7 @@ mod tests {
             }
         }
         assert_eq!(HANDOFF_PROTOCOL_VERSION, 1);
-        assert_eq!(CONTINUATION_STATE_VERSION, 2);
+        assert_eq!(CONTINUATION_STATE_VERSION, 3);
     }
 
     #[test]
@@ -1618,37 +1859,105 @@ mod tests {
     }
 
     #[test]
-    fn v2_blob_vector_pins_generation_secrets_and_pending_response() {
+    fn v3_blob_round_trips_and_rejects_legacy_versions() {
         let state = test_state(Vec::new(), Vec::new());
         let mut blob = Vec::new();
-        encode_blob(&state, &mut blob).expect("v2 state must encode");
-
-        // SHA-256 of the v2 blob containing the fixed generation secrets,
-        // sequences, pending KeyUpdate response, user, example.com:443
-        // destination, and empty pending buffers from `test_state`.
-        let digest: [u8; 32] = Sha256::digest(&blob).into();
-        assert_eq!(blob.len(), 124);
-        assert_eq!(
-            digest,
-            [
-                0x88, 0xde, 0x8c, 0x29, 0xdb, 0xe9, 0x76, 0xf1, 0xb3, 0x7e, 0xc2, 0x63, 0x54, 0xc2,
-                0x3f, 0xd1, 0x3f, 0xb6, 0xfd, 0x33, 0x96, 0xbf, 0x18, 0x8c, 0x7b, 0xa1, 0x83, 0xb4,
-                0x0c, 0x91, 0x1b, 0xe9,
-            ]
-        );
-
-        let decoded = decode_blob(&blob).expect("the pinned v2 blob must decode");
+        encode_blob(&state, &mut blob).expect("v3 state must encode");
+        assert_eq!(blob[0], CONTINUATION_STATE_VERSION);
+        let decoded = decode_blob(&blob).expect("the v3 blob must decode");
         assert_states_equal(&decoded, &state);
+        assert_eq!(decoded.session_kind(), SessionKind::Tcp);
+
+        // Legacy v2 length/layout must not be silently reinterpreted as v3.
+        let mut legacy = blob.clone();
+        legacy[0] = 2;
+        assert_eq!(decode_blob(&legacy).unwrap_err(), HandoffError::State);
+        assert_eq!(decode_blob(&[2]).unwrap_err(), HandoffError::State);
     }
 
     #[test]
-    fn v2_blob_rejects_non_boolean_pending_response() {
+    fn v3_blob_rejects_non_boolean_pending_response_and_bad_session_kind() {
         let state = test_state(Vec::new(), Vec::new());
         let mut blob = Vec::new();
-        encode_blob(&state, &mut blob).expect("v2 state must encode");
+        encode_blob(&state, &mut blob).expect("v3 state must encode");
         let pending_response_offset = 1 + 2 + 2 * 32 + 2 * 8;
         blob[pending_response_offset] = 2;
         assert_eq!(decode_blob(&blob).unwrap_err(), HandoffError::State);
+
+        let mut blob = Vec::new();
+        encode_blob(&state, &mut blob).expect("v3 state must encode");
+        let session_kind_offset = pending_response_offset + 1;
+        blob[session_kind_offset] = 0xff;
+        assert_eq!(decode_blob(&blob).unwrap_err(), HandoffError::State);
+    }
+
+    #[test]
+    fn v3_xudp_session_preserves_kind_policy_prefetch_and_sequences() {
+        let suite = CipherSuite::ChaCha20Poly1305Sha256;
+        let destination = Destination::new(Address::Ipv4(std::net::Ipv4Addr::LOCALHOST), 53);
+        let pending = b"pending-ciphertext-bytes".to_vec();
+        let prefetched = b"vision-wire-prefetched-xudp-frames".to_vec();
+        let policy = HandoffPolicySnapshot::xudp_initial(destination.clone());
+        let state = ContinuationState::new(
+            suite,
+            TrafficSecret::from_bytes(suite.hash(), &[0x21; 32]).expect("client secret"),
+            9,
+            TrafficSecret::from_bytes(suite.hash(), &[0x22; 32]).expect("server secret"),
+            1,
+            true,
+            SessionKind::Xudp,
+            [0xAB; 16],
+            "entry-in",
+            destination.clone(),
+            pending.clone(),
+            prefetched.clone(),
+            policy.clone(),
+        )
+        .expect("xudp continuation");
+
+        let (landing_secret, landing_public) = landing_key_pair(0xA1);
+        let psk = HandoffPsk::new([0x5A; 32]);
+        let message = seal(&state, &psk, &landing_public);
+        let opened = open_transfer(
+            &message,
+            &HandoffLandingKeys::single(psk, StaticX25519Key::new(&landing_secret)),
+            &test_cache(),
+            NOW,
+            WINDOW,
+        )
+        .expect("xudp transfer must open")
+        .into_state();
+
+        assert_eq!(opened.session_kind(), SessionKind::Xudp);
+        assert_eq!(opened.inbound_tag(), "entry-in");
+        assert_eq!(opened.client_sequence(), 9);
+        assert_eq!(opened.server_sequence(), 1);
+        assert!(opened.key_update_response_pending());
+        assert_eq!(opened.pending_ciphertext(), pending.as_slice());
+        assert_eq!(opened.prefetched_plaintext(), prefetched.as_slice());
+        assert_eq!(opened.policy(), &policy);
+        assert_eq!(opened.destination(), &destination);
+        policy
+            .authorize_udp_destination(&destination)
+            .expect("initial dest allowed");
+        let other = Destination::new(Address::Ipv4(std::net::Ipv4Addr::LOCALHOST), 54);
+        assert_eq!(
+            policy.authorize_udp_destination(&other).unwrap_err(),
+            HandoffError::State
+        );
+    }
+
+    #[test]
+    fn transfer_header_rejects_continuation_version_mismatch() {
+        let (landing_secret, landing_public) = landing_key_pair(0xA2);
+        let psk = HandoffPsk::new([0x5B; 32]);
+        let state = test_state(Vec::new(), Vec::new());
+        let mut message = seal(&state, &psk, &landing_public);
+        message[STATE_VERSION_OFFSET] = 2;
+        assert_eq!(
+            open_error(&message, &psk, &landing_secret, &test_cache(), NOW),
+            HandoffError::Version
+        );
     }
 
     #[test]
@@ -1901,10 +2210,16 @@ mod tests {
             TrafficSecret::from_bytes(suite.hash(), &[0x12; 32]).expect("server secret"),
             0,
             false,
+            SessionKind::Tcp,
             [0x33; 16],
+            "public-reality",
             Destination::new(Address::Ipv4(std::net::Ipv4Addr::LOCALHOST), 443),
             pending,
             Vec::new(),
+            HandoffPolicySnapshot::tcp_placeholder(Destination::new(
+                Address::Ipv4(std::net::Ipv4Addr::LOCALHOST),
+                443,
+            )),
         );
         assert_eq!(
             oversized.unwrap_err(),
@@ -1920,10 +2235,16 @@ mod tests {
             TrafficSecret::from_bytes(suite.hash(), &[0x12; 32]).expect("server secret"),
             0,
             false,
+            SessionKind::Tcp,
             [0x33; 16],
+            "public-reality",
             Destination::new(Address::Ipv4(std::net::Ipv4Addr::LOCALHOST), 443),
             Vec::new(),
             Vec::new(),
+            HandoffPolicySnapshot::tcp_placeholder(Destination::new(
+                Address::Ipv4(std::net::Ipv4Addr::LOCALHOST),
+                443,
+            )),
         );
         assert_eq!(
             mismatched.unwrap_err(),

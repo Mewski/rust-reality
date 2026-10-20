@@ -326,11 +326,14 @@ mod tests {
     /// authentication step passed without standing up a destination.
     fn rotation_message(psk: [u8; 32], landing_secret: [u8; 32]) -> Vec<u8> {
         use crate::protocol::{
-            handoff::{ContinuationState, HandoffPsk, seal_transfer},
+            handoff::{
+                ContinuationState, HandoffPolicySnapshot, HandoffPsk, SessionKind, seal_transfer,
+            },
             reality::tls13::{CipherSuite, TrafficSecret},
         };
         let landing_public = crate::crypto::StaticX25519Key::new(&landing_secret).public_key();
         let suite = CipherSuite::ChaCha20Poly1305Sha256;
+        let destination = Destination::new(Address::Ipv4(Ipv4Addr::LOCALHOST), 9);
         let state = ContinuationState::new(
             suite,
             TrafficSecret::from_bytes(suite.hash(), &[0x11; 32]).expect("client secret"),
@@ -338,10 +341,13 @@ mod tests {
             TrafficSecret::from_bytes(suite.hash(), &[0x12; 32]).expect("server secret"),
             0,
             false,
+            SessionKind::Tcp,
             [0x33; 16],
-            Destination::new(Address::Ipv4(Ipv4Addr::LOCALHOST), 9),
+            "public-reality",
+            destination.clone(),
             Vec::new(),
             Vec::new(),
+            HandoffPolicySnapshot::tcp_placeholder(destination),
         )
         .expect("test state must be valid");
         let now = std::time::SystemTime::now()
