@@ -1,6 +1,6 @@
 //! NXR UDP association over the LINE→LANDING TCP hop (ADR 0060 Option A).
 //!
-//! After an authenticated UDP-mode open ([`FLAG_UDP`](super::nxr::FLAG_UDP)), both
+//! After an authenticated UDP-mode open ([`FLAG_UDP`]), both
 //! directions exchange length-prefixed datagram frames whose destination fields
 //! are covered by a session MAC derived from the PSK and the open transcript.
 //! Payload bytes are not encrypted (same hop threat model as TCP NXR).
