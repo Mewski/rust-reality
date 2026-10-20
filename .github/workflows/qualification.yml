@@ -130,6 +130,68 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --locked --test client_socks5_udp_e2e -- --nocapture
+      - name: Mandatory stock Xray Client to rust-reality Server XUDP
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          # ADR 0059 / AGENTS.md §6: unmodified stock Xray Client → rust-reality
+          # Server XUDP is a release gate. Missing fixture MUST fail closed.
+          test -n "${XRAY_BIN:-}"
+          test -x "$XRAY_BIN"
+          mkdir -p "$Q/stock-xray-xudp"
+          {
+            printf 'source=%s\nrun=%s\nattempt=%s\n' \
+              "$HEAD_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf 'xray_pin=XTLS/Xray-core v26.9.9 linux-64\n'
+            printf 'xray_zip_sha256=1eb9175d0f0a8f8149c9230a7fc5ae66ce332ed20a53155ce61fe62e3f58b7df\n'
+            printf 'test=stock_xray_client_udp_echo_via_rust_reality_entry\n'
+            printf 'gate=mandatory-xray-client-to-rust-reality-xudp\n'
+            "$XRAY_BIN" version
+            sha256sum "$XRAY_BIN"
+          } | tee "$Q/stock-xray-xudp/identity.txt"
+          # Cover peer for REALITY uses openssl on PATH (runner image) or OPENSSL_BIN.
+          if ! command -v openssl >/dev/null 2>&1; then
+            test -n "${OPENSSL_BIN:-}"
+            test -x "$OPENSSL_BIN"
+            export PATH="$(dirname "$OPENSSL_BIN"):$PATH"
+          fi
+          LOG="$Q/stock-xray-xudp/cargo-test.log"
+          set +e
+          cargo test --locked --test xudp_stock_xray_interop \
+            stock_xray_client_udp_echo_via_rust_reality_entry \
+            -- --exact --nocapture --ignored 2>&1 | tee "$LOG"
+          status=${PIPESTATUS[0]}
+          set -e
+          if grep -E 'skip: XRAY_BIN' "$LOG"; then
+            printf '%s\n' 'FAIL: mandatory stock Xray XUDP test skipped despite fixture' >&2
+            exit 1
+          fi
+          if grep -E 'running 0 tests' "$LOG"; then
+            printf '%s\n' 'FAIL: mandatory stock Xray XUDP gate matched zero tests' >&2
+            exit 1
+          fi
+          if ! grep -F 'test stock_xray_client_udp_echo_via_rust_reality_entry ... ok' "$LOG"; then
+            printf '%s\n' 'FAIL: mandatory stock Xray XUDP test did not report ok' >&2
+            exit 1
+          fi
+          if ! grep -E 'test result: ok\. 1 passed; 0 failed; .* ignored' "$LOG"; then
+            printf '%s\n' 'FAIL: expected exactly 1 passed for stock Xray XUDP gate' >&2
+            exit 1
+          fi
+          # Must never pull the historical rust-reality → Xray Server probe.
+          if grep -F 'rust_reality_client_udp_echo_via_stock_xray_server' "$LOG" | grep -v '^ignore'; then
+            if grep -E 'test rust_reality_client_udp_echo_via_stock_xray_server \.\.\.' "$LOG"; then
+              printf '%s\n' 'FAIL: non-required rust→Xray Server test was executed' >&2
+              exit 1
+            fi
+          fi
+          test "$status" -eq 0
+          {
+            printf 'verdict=PASS\n'
+            printf 'status=%s\n' "$status"
+            grep -E 'test result:' "$LOG" | tail -n1
+            grep -F 'xudp_udp_rtt_ms' "$LOG" || true
+          } | tee "$Q/stock-xray-xudp/receipt.txt"
       - name: Unmodified Xray REALITY and Vision interoperability
         timeout-minutes: 5
         run: |
@@ -173,6 +235,8 @@ jobs:
           names = [
               'identities.txt', 'frozen/freeze.json', 'frozen/SHA256SUMS',
               'frozen/binary/rust-reality',
+              'stock-xray-xudp/identity.txt', 'stock-xray-xudp/receipt.txt',
+              'stock-xray-xudp/cargo-test.log',
               'interop/summary.json', 'interop/environment.json', 'interop/completion.json',
               'interop/certificate-san.txt',
               'pressure/pressure-result.json', 'pressure/gate-summary.json',

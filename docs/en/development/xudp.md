@@ -80,9 +80,13 @@ Directional contract (AGENTS.md §6, ADR 0059):
   Exact-head Native qualification.
 - **UDP via XUDP — mandatory proven:** unmodified stock Xray SOCKS client
   (`udp: true`, flow `xtls-rprx-vision-udp443`) → rust-reality entry Direct UDP
-  echo (`tests/xudp_stock_xray_interop.rs`, requires `XRAY_BIN`). Local loopback
-  single-datagram RTT samples (warm path) reported median ≈7–8 ms in one sandbox
-  run — setup/teardown wall clock is separate and **not** a throughput claim.
+  echo. Exact-head Native downloads pinned Xray v26.9.9, verifies the zip
+  SHA-256, exports `XRAY_BIN`, and runs
+  `stock_xray_client_udp_echo_via_rust_reality_entry` with `--ignored --exact`
+  (`tests/xudp_stock_xray_interop.rs`). The test panics if `XRAY_BIN` is missing;
+  the workflow also fails on skip markers, zero matched cases, or any result
+  other than exactly one pass. Local loopback single-datagram RTT samples
+  (warm path) are diagnostic only — **not** a throughput claim.
 - **UDP via XUDP — historical / ignored (not a release blocker):** rust-reality
   unified client → stock Xray VLESS+REALITY server. Past failure evidence
   (Go ClientHello parse, inbound `SetFlushNext` response ordering, freedom

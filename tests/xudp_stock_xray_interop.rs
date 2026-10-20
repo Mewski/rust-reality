@@ -1,12 +1,16 @@
 //! Stock Xray bidirectional UDP/XUDP interoperability and UDP/443 probe.
 //!
-//! When `XRAY_BIN` is unset the tests return early (not a pass claim). Native
-//! qualification exports `XRAY_BIN` to an unmodified stock binary.
+//! Mandatory gate (AGENTS.md §6 / ADR 0059): unmodified stock Xray Client →
+//! rust-reality Server XUDP. Exact-head Native downloads a pinned Xray, exports
+//! `XRAY_BIN`, and runs `stock_xray_client_udp_echo_via_rust_reality_entry` with
+//! `--ignored --exact`. That test panics if `XRAY_BIN` is missing — it MUST NOT
+//! early-return as a green pass.
 //!
-//! Proven when green (mandatory gates — AGENTS.md §6 / ADR 0059):
+//! Also covered when green:
 //! 1. rust-reality entry ← stock Xray SOCKS(udp) client (flow vision-udp443)
 //! 2. QUIC-shaped datagram to UDP/443 via XUDP with `allowUdp443` (no TCP CONNECT)
-//!    on the rust↔rust path when `:443` bind is permitted
+//!    on the rust↔rust path when `:443` bind is permitted (may skip without
+//!    privilege to bind `:443`; that skip is not a Native Xray-ingress claim)
 //!
 //! Historical only (NOT a release gate): rust-reality client → stock Xray server
 //! remains `#[ignore]`. Not native QUIC transport. See `docs/en/development/xudp.md`.
@@ -41,6 +45,33 @@ impl Drop for DirGuard {
 
 fn xray_bin() -> Option<PathBuf> {
     std::env::var_os("XRAY_BIN").map(PathBuf::from)
+}
+
+/// Resolve the mandatory stock Xray fixture. Panics when unset or not executable
+/// so a missing Native pin cannot register as a silent green pass.
+fn require_stock_xray_bin() -> PathBuf {
+    let path = xray_bin().unwrap_or_else(|| {
+        panic!("XRAY_BIN must point to an executable unmodified stock Xray-core binary (Native pin: XTLS/Xray-core v26.9.9 linux-64); missing fixture is FAIL, not skip")
+    });
+    assert!(
+        path.is_file(),
+        "XRAY_BIN={} is not a regular file",
+        path.display()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path)
+            .unwrap_or_else(|e| panic!("stat {}: {e}", path.display()))
+            .permissions()
+            .mode();
+        assert!(
+            mode & 0o111 != 0,
+            "XRAY_BIN={} is not executable (mode {mode:#o})",
+            path.display()
+        );
+    }
+    path
 }
 
 fn free_port() -> u16 {
@@ -266,11 +297,9 @@ fn start_openssl_cover(root: &Path) -> (u16, KillOnDrop) {
 }
 
 #[test]
+#[ignore = "requires pinned stock Xray via XRAY_BIN; Exact-head Native runs with --ignored --exact"]
 fn stock_xray_client_udp_echo_via_rust_reality_entry() {
-    let Some(xray) = xray_bin() else {
-        eprintln!("skip: XRAY_BIN not set");
-        return;
-    };
+    let xray = require_stock_xray_bin();
     let root = std::env::temp_dir().join(format!("rr-xudp-xray-client-{}", free_port()));
     fs::create_dir_all(&root).unwrap();
     let _guard = DirGuard(root.clone());
