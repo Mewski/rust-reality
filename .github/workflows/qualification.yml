@@ -382,6 +382,40 @@ jobs:
           fi
           sudo apt-get install -y --no-install-recommends libcap2-bin >/dev/null
           export RR_REQUIRE_UDP443=1
+          # Prior UDP/443 gates can leave :443 busy for a beat (echo/watchdog
+          # threads, Quinn endpoint teardown). Reclaim before binding again —
+          # silent skip is forbidden; we fail closed if still busy after wait.
+          ensure_udp443_free() {
+            local deadline=$((SECONDS + 30))
+            while (( SECONDS < deadline )); do
+              if python3 - <<'PY'
+import socket, sys
+ok = True
+for kind in (socket.SOCK_DGRAM, socket.SOCK_STREAM):
+    s = socket.socket(socket.AF_INET, kind)
+    try:
+        s.bind(("127.0.0.1", 443))
+    except OSError as e:
+        print(e, flush=True)
+        ok = False
+        break
+    finally:
+        s.close()
+sys.exit(0 if ok else 1)
+PY
+              then
+                printf '127.0.0.1:443 free\n'
+                return 0
+              fi
+              sudo fuser -k 443/udp 443/tcp 2>/dev/null || true
+              sleep 0.2
+            done
+            printf '%s\n' 'FAIL: 127.0.0.1:443 still busy after reclaim' >&2
+            ss -ulnp | head -n 40 || true
+            ss -tlnp | head -n 40 || true
+            return 1
+          }
+          ensure_udp443_free
           LOG="$Q/nxr-udp443-h3/cargo-test.log"
           : > "$LOG"
           cargo test --locked --test xudp_nxr_e2e --no-run
@@ -435,6 +469,40 @@ jobs:
           fi
           sudo apt-get install -y --no-install-recommends libcap2-bin >/dev/null
           export RR_REQUIRE_UDP443=1
+          # Prior UDP/443 gates can leave :443 busy for a beat (echo/watchdog
+          # threads, Quinn endpoint teardown). Reclaim before binding again —
+          # silent skip is forbidden; we fail closed if still busy after wait.
+          ensure_udp443_free() {
+            local deadline=$((SECONDS + 30))
+            while (( SECONDS < deadline )); do
+              if python3 - <<'PY'
+import socket, sys
+ok = True
+for kind in (socket.SOCK_DGRAM, socket.SOCK_STREAM):
+    s = socket.socket(socket.AF_INET, kind)
+    try:
+        s.bind(("127.0.0.1", 443))
+    except OSError as e:
+        print(e, flush=True)
+        ok = False
+        break
+    finally:
+        s.close()
+sys.exit(0 if ok else 1)
+PY
+              then
+                printf '127.0.0.1:443 free\n'
+                return 0
+              fi
+              sudo fuser -k 443/udp 443/tcp 2>/dev/null || true
+              sleep 0.2
+            done
+            printf '%s\n' 'FAIL: 127.0.0.1:443 still busy after reclaim' >&2
+            ss -ulnp | head -n 40 || true
+            ss -tlnp | head -n 40 || true
+            return 1
+          }
+          ensure_udp443_free
           LOG="$Q/handoff-udp443-h3/cargo-test.log"
           : > "$LOG"
           cargo test --locked --test xudp_handoff_e2e --no-run

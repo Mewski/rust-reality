@@ -17,14 +17,14 @@
 
 use std::{
     fs,
-    io::{self, IoSliceMut, Read, Write},
+    io::{self, ErrorKind, IoSliceMut, Read, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket as StdUdpSocket},
     path::{Path, PathBuf},
     pin::Pin,
     process::{Child, Command, Stdio},
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     task::{Context, Poll},
     thread,
@@ -62,15 +62,84 @@ impl Drop for DirGuard {
     }
 }
 
+fn bind_udp443() -> StdUdpSocket {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        match StdUdpSocket::bind(DEST_443) {
+            Ok(sock) => return sock,
+            Err(err)
+                if err.kind() == ErrorKind::AddrInUse && Instant::now() < deadline =>
+            {
+                eprintln!("UDP/443 still in use ({err}); retrying");
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(err) => panic!(
+                "cannot bind 127.0.0.1:443 ({err}); Exact-head Native must grant \
+                 CAP_NET_BIND_SERVICE (RR_REQUIRE_UDP443=1). Unprivileged skip is FAIL, not PASS"
+            ),
+        }
+    }
+}
+
+fn bind_tcp443() -> TcpListener {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        match TcpListener::bind(DEST_443) {
+            Ok(sock) => return sock,
+            Err(err)
+                if err.kind() == ErrorKind::AddrInUse && Instant::now() < deadline =>
+            {
+                eprintln!("TCP/443 still in use ({err}); retrying");
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(err) => panic!("TCP watchdog bind 127.0.0.1:443: {err}"),
+        }
+    }
+}
+
+struct TcpWatchdog {
+    hits: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    join: Option<thread::JoinHandle<()>>,
+}
+
+impl TcpWatchdog {
+    fn spawn() -> Self {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let hits_bg = hits.clone();
+        let stop_bg = stop.clone();
+        let tcp_watch = bind_tcp443();
+        tcp_watch.set_nonblocking(true).ok();
+        let join = thread::spawn(move || {
+            while !stop_bg.load(Ordering::SeqCst) {
+                if tcp_watch.accept().is_ok() {
+                    hits_bg.fetch_add(1, Ordering::SeqCst);
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        });
+        Self {
+            hits,
+            stop,
+            join: Some(join),
+        }
+    }
+}
+
+impl Drop for TcpWatchdog {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
 fn require_udp443_capability() {
     // Always fail closed when this binary is the mandatory gate: missing bind
     // privilege must never register as a green skip.
-    if let Err(err) = StdUdpSocket::bind(DEST_443) {
-        panic!(
-            "cannot bind 127.0.0.1:443 ({err}); Exact-head Native must grant \
-             CAP_NET_BIND_SERVICE (RR_REQUIRE_UDP443=1). Unprivileged skip is FAIL, not PASS"
-        );
-    }
+    let _probe = bind_udp443();
 }
 
 fn free_port() -> u16 {
@@ -601,7 +670,7 @@ fn udp443_echo_via_xudp_with_allow_udp443() {
     fs::create_dir_all(&root).unwrap();
     let _guard = DirGuard(root.clone());
 
-    let echo = StdUdpSocket::bind(DEST_443).expect("bind UDP/443 for echo");
+    let echo = bind_udp443();
     assert_eq!(echo.local_addr().unwrap().port(), 443);
     echo.set_read_timeout(Some(Duration::from_secs(10))).ok();
     let echo_c = echo.try_clone().unwrap();
@@ -618,21 +687,7 @@ fn udp443_echo_via_xudp_with_allow_udp443() {
     });
 
     // TCP watchdog: any TCP accept on :443 means an illicit TCP fallback path.
-    let tcp_hits = Arc::new(AtomicUsize::new(0));
-    let tcp_hits_bg = tcp_hits.clone();
-    let tcp_watch = TcpListener::bind(DEST_443).expect("TCP watchdog on :443");
-    tcp_watch
-        .set_nonblocking(true)
-        .expect("nonblocking watchdog");
-    let watchdog = thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while Instant::now() < deadline {
-            if tcp_watch.accept().is_ok() {
-                tcp_hits_bg.fetch_add(1, Ordering::SeqCst);
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-    });
+    let watchdog = TcpWatchdog::spawn();
 
     let (socks_port, _cover, _entry, _client) = start_rr_stack(&root, true);
     let body = socks5_udp_round_trip(socks_port, 443, MARKER).unwrap_or_else(|e| {
@@ -644,9 +699,8 @@ fn udp443_echo_via_xudp_with_allow_udp443() {
     });
     assert_eq!(body, MARKER);
     let _ = echo_thread.join();
-    let _ = watchdog.join();
     assert_eq!(
-        tcp_hits.load(Ordering::SeqCst),
+        watchdog.hits.load(Ordering::SeqCst),
         0,
         "TCP accept on :443 — illicit TCP fallback"
     );
@@ -851,19 +905,7 @@ async fn genuine_http3_over_xudp_udp443_no_tcp_fallback() {
     .await
     .expect("stack join");
 
-    let tcp_hits = Arc::new(AtomicUsize::new(0));
-    let tcp_hits_bg = tcp_hits.clone();
-    let tcp_watch = TcpListener::bind(DEST_443).expect("TCP watchdog");
-    tcp_watch.set_nonblocking(true).ok();
-    thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(120);
-        while Instant::now() < deadline {
-            if tcp_watch.accept().is_ok() {
-                tcp_hits_bg.fetch_add(1, Ordering::SeqCst);
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-    });
+    let watchdog = TcpWatchdog::spawn();
 
     let (cert, key, roots) = make_h3_certs();
     let mut server_crypto = rustls::ServerConfig::builder()
@@ -878,7 +920,7 @@ async fn genuine_http3_over_xudp_udp443_no_tcp_fallback() {
     transport.initial_mtu(1200);
     server_config.transport = Arc::new(transport);
 
-    let server_sock = StdUdpSocket::bind(DEST_443).expect("H3 origin UDP/443");
+    let server_sock = bind_udp443();
     assert_eq!(server_sock.local_addr().unwrap().port(), 443);
     let server = Endpoint::new(
         EndpointConfig::default(),
@@ -1011,7 +1053,7 @@ async fn genuine_http3_over_xudp_udp443_no_tcp_fallback() {
         "origin handled {handled} H3 requests (want >= 3)"
     );
     assert_eq!(
-        tcp_hits.load(Ordering::SeqCst),
+        watchdog.hits.load(Ordering::SeqCst),
         0,
         "TCP accept on :443 during H3 — illicit TCP fallback"
     );
@@ -1037,19 +1079,7 @@ async fn genuine_http3_over_nxr_xudp_udp443_no_tcp_fallback() {
     .await
     .expect("nxr stack join");
 
-    let tcp_hits = Arc::new(AtomicUsize::new(0));
-    let tcp_hits_bg = tcp_hits.clone();
-    let tcp_watch = TcpListener::bind(DEST_443).expect("TCP watchdog");
-    tcp_watch.set_nonblocking(true).ok();
-    thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(120);
-        while Instant::now() < deadline {
-            if tcp_watch.accept().is_ok() {
-                tcp_hits_bg.fetch_add(1, Ordering::SeqCst);
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-    });
+    let watchdog = TcpWatchdog::spawn();
 
     let origin_peers = Arc::new(std::sync::Mutex::new(Vec::<SocketAddr>::new()));
     let (cert, key, roots) = make_h3_certs();
@@ -1065,7 +1095,7 @@ async fn genuine_http3_over_nxr_xudp_udp443_no_tcp_fallback() {
     transport.initial_mtu(1200);
     server_config.transport = Arc::new(transport);
 
-    let server_sock = StdUdpSocket::bind(DEST_443).expect("H3 origin UDP/443");
+    let server_sock = bind_udp443();
     assert_eq!(server_sock.local_addr().unwrap().port(), 443);
     let server = Endpoint::new(
         EndpointConfig::default(),
@@ -1182,7 +1212,7 @@ async fn genuine_http3_over_nxr_xudp_udp443_no_tcp_fallback() {
     req_res.expect("H3 requests");
     let handled = server_task.await.expect("server task");
     assert!(handled >= 3, "origin handled {handled}");
-    assert_eq!(tcp_hits.load(Ordering::SeqCst), 0, "TCP fallback on :443");
+    assert_eq!(watchdog.hits.load(Ordering::SeqCst), 0, "TCP fallback on :443");
     let peers = origin_peers.lock().unwrap().clone();
     assert!(
         peers
@@ -1335,19 +1365,7 @@ async fn stock_xray_client_nxr_genuine_http3_udp443() {
     );
     wait_tcp(socks_port, Duration::from_secs(20));
 
-    let tcp_hits = Arc::new(AtomicUsize::new(0));
-    let tcp_hits_bg = tcp_hits.clone();
-    let tcp_watch = TcpListener::bind(DEST_443).expect("TCP watchdog");
-    tcp_watch.set_nonblocking(true).ok();
-    thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(120);
-        while Instant::now() < deadline {
-            if tcp_watch.accept().is_ok() {
-                tcp_hits_bg.fetch_add(1, Ordering::SeqCst);
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-    });
+    let watchdog = TcpWatchdog::spawn();
 
     let origin_peers = Arc::new(std::sync::Mutex::new(Vec::<SocketAddr>::new()));
     let (cert, key, roots) = make_h3_certs();
@@ -1362,7 +1380,7 @@ async fn stock_xray_client_nxr_genuine_http3_udp443() {
     transport.max_idle_timeout(Some(Duration::from_secs(60).try_into().unwrap()));
     transport.initial_mtu(1200);
     server_config.transport = Arc::new(transport);
-    let server_sock = StdUdpSocket::bind(DEST_443).expect("H3 origin");
+    let server_sock = bind_udp443();
     let server = Endpoint::new(
         EndpointConfig::default(),
         Some(server_config),
@@ -1460,7 +1478,7 @@ async fn stock_xray_client_nxr_genuine_http3_udp443() {
     req_res.unwrap();
     let handled = server_task.await.unwrap();
     assert!(handled >= 2);
-    assert_eq!(tcp_hits.load(Ordering::SeqCst), 0);
+    assert_eq!(watchdog.hits.load(Ordering::SeqCst), 0);
     let peers = origin_peers.lock().unwrap().clone();
     assert!(
         peers
@@ -1488,19 +1506,7 @@ async fn genuine_http3_over_handoff_xudp_udp443_no_tcp_fallback() {
     .await
     .expect("handoff stack join");
 
-    let tcp_hits = Arc::new(AtomicUsize::new(0));
-    let tcp_hits_bg = tcp_hits.clone();
-    let tcp_watch = TcpListener::bind(DEST_443).expect("TCP watchdog");
-    tcp_watch.set_nonblocking(true).ok();
-    thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(120);
-        while Instant::now() < deadline {
-            if tcp_watch.accept().is_ok() {
-                tcp_hits_bg.fetch_add(1, Ordering::SeqCst);
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-    });
+    let watchdog = TcpWatchdog::spawn();
 
     let origin_peers = Arc::new(std::sync::Mutex::new(Vec::<SocketAddr>::new()));
     let (cert, key, roots) = make_h3_certs();
@@ -1516,7 +1522,7 @@ async fn genuine_http3_over_handoff_xudp_udp443_no_tcp_fallback() {
     transport.initial_mtu(1200);
     server_config.transport = Arc::new(transport);
 
-    let server_sock = StdUdpSocket::bind(DEST_443).expect("H3 origin UDP/443");
+    let server_sock = bind_udp443();
     assert_eq!(server_sock.local_addr().unwrap().port(), 443);
     let server = Endpoint::new(
         EndpointConfig::default(),
@@ -1633,7 +1639,7 @@ async fn genuine_http3_over_handoff_xudp_udp443_no_tcp_fallback() {
     req_res.expect("H3 requests");
     let handled = server_task.await.expect("server task");
     assert!(handled >= 3, "origin handled {handled}");
-    assert_eq!(tcp_hits.load(Ordering::SeqCst), 0, "TCP fallback on :443");
+    assert_eq!(watchdog.hits.load(Ordering::SeqCst), 0, "TCP fallback on :443");
     let peers = origin_peers.lock().unwrap().clone();
     assert!(
         peers
@@ -1792,19 +1798,7 @@ async fn stock_xray_client_handoff_genuine_http3_udp443() {
     );
     wait_tcp(socks_port, Duration::from_secs(20));
 
-    let tcp_hits = Arc::new(AtomicUsize::new(0));
-    let tcp_hits_bg = tcp_hits.clone();
-    let tcp_watch = TcpListener::bind(DEST_443).expect("TCP watchdog");
-    tcp_watch.set_nonblocking(true).ok();
-    thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(120);
-        while Instant::now() < deadline {
-            if tcp_watch.accept().is_ok() {
-                tcp_hits_bg.fetch_add(1, Ordering::SeqCst);
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-    });
+    let watchdog = TcpWatchdog::spawn();
 
     let origin_peers = Arc::new(std::sync::Mutex::new(Vec::<SocketAddr>::new()));
     let (cert, key, roots) = make_h3_certs();
@@ -1820,7 +1814,7 @@ async fn stock_xray_client_handoff_genuine_http3_udp443() {
     transport.initial_mtu(1200);
     server_config.transport = Arc::new(transport);
 
-    let server_sock = StdUdpSocket::bind(DEST_443).expect("H3 origin UDP/443");
+    let server_sock = bind_udp443();
     let server = Endpoint::new(
         EndpointConfig::default(),
         Some(server_config),
@@ -1915,7 +1909,7 @@ async fn stock_xray_client_handoff_genuine_http3_udp443() {
     req_res.expect("H3 request");
     let handled = server_task.await.expect("server task");
     assert!(handled >= 1, "origin handled {handled}");
-    assert_eq!(tcp_hits.load(Ordering::SeqCst), 0, "TCP fallback on :443");
+    assert_eq!(watchdog.hits.load(Ordering::SeqCst), 0, "TCP fallback on :443");
     let peers = origin_peers.lock().unwrap().clone();
     assert!(
         peers
