@@ -42,7 +42,7 @@ pub(super) fn detail(error: &ConnectionRunError) -> Option<FailureDetail> {
         ConnectionRunError::Handoff(HandoffLandingError::Session(error)) => {
             (Stage::SessionRelay, session(error))
         }
-        ConnectionRunError::Nxr(NxrLandingError::Relay(error))
+        ConnectionRunError::Nxr(NxrLandingError::Relay(error) | NxrLandingError::UdpIo(error))
         | ConnectionRunError::Vision(
             VisionSessionError::Relay(error) | VisionSessionError::Io(error),
         ) => (Stage::SessionRelay, io_cause(error)),
@@ -69,6 +69,7 @@ pub(super) fn detail(error: &ConnectionRunError) -> Option<FailureDetail> {
         | ConnectionRunError::Nxr(
             NxrLandingError::Protocol(_)
             | NxrLandingError::Authentication(_)
+            | NxrLandingError::UdpProtocol(_)
             | NxrLandingError::Read(_)
             | NxrLandingError::Allocation
             | NxrLandingError::Clock,
@@ -111,7 +112,9 @@ fn landing_authenticate(error: &ConnectionRunError) -> CauseAndErrno {
         | ConnectionRunError::Nxr(NxrLandingError::Clock) => (Cause::Clock, None),
         ConnectionRunError::Handoff(HandoffLandingError::Protocol(_))
         | ConnectionRunError::Nxr(
-            NxrLandingError::Protocol(_) | NxrLandingError::Authentication(_),
+            NxrLandingError::Protocol(_)
+            | NxrLandingError::Authentication(_)
+            | NxrLandingError::UdpProtocol(_),
         ) => (Cause::Protocol, None),
         _ => (Cause::Internal, None),
     }

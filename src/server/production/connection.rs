@@ -186,7 +186,9 @@ impl ConnectionRunError {
             Self::Nxr(NxrLandingError::Relay(error)) if is_write_stall_timeout_abort(error) => {
                 RejectionReason::Timeout
             }
-            Self::Nxr(NxrLandingError::Relay(_)) => RejectionReason::Outbound,
+            Self::Nxr(NxrLandingError::Relay(_) | NxrLandingError::UdpIo(_)) => {
+                RejectionReason::Outbound
+            }
             Self::Nxr(_) | Self::Handoff(_) => RejectionReason::Authentication,
         }
     }

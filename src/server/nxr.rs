@@ -12,8 +12,8 @@ use std::{
 
 use base64::prelude::{BASE64_URL_SAFE_NO_PAD, Engine as _};
 use tokio::{
-    io::AsyncReadExt,
-    net::TcpStream,
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpStream, UdpSocket},
     time::{self, Instant},
 };
 use zeroize::Zeroizing;
@@ -23,10 +23,15 @@ use crate::{
     network::NetworkEnvironment,
     protocol::{
         nxr::{
-            NxrKey, NxrProtocolError, REQUEST_HEADER_LEN, decode_authenticated_request,
-            request_len_from_header,
+            FLAG_TCP, FLAG_UDP, NxrKey, NxrProtocolError, REQUEST_HEADER_LEN,
+            decode_authenticated_request, peek_open_flags, request_len_from_header,
         },
-        vless::Destination,
+        nxr_udp::{
+            DIR_LANDING_TO_LINE, DIR_LINE_TO_LANDING, FRAME_TYPE_CLOSE, FRAME_TYPE_DATAGRAM,
+            NXR_UDP_MAX_PAYLOAD, NxrUdpError, NxrUdpSeq, NxrUdpSessionKey, decode_udp_open,
+            drain_frames, encode_frame, open_authenticated_prefix, udp_open_len_from_header,
+        },
+        vless::{Address, Destination},
     },
     transport::{
         RelayContext,
@@ -303,6 +308,31 @@ impl NxrAuthenticator {
         let (_, destination) = authenticated.into_parts();
         Ok(destination)
     }
+
+    /// Verifies a UDP-mode open, reserves the nonce, and derives the session MAC key.
+    ///
+    /// # Errors
+    ///
+    /// Rejects TCP-mode opens, HMAC/time failures, and replay admission failures.
+    pub fn authenticate_udp(
+        &self,
+        request: &[u8],
+        now: u64,
+    ) -> Result<
+        (
+            crate::protocol::nxr_udp::UdpAuthenticatedOpen,
+            NxrUdpSessionKey,
+        ),
+        NxrAuthenticationError,
+    > {
+        let open = decode_udp_open(request, &self.key, now, self.maximum_time_difference)
+            .map_err(|error| NxrAuthenticationError::Protocol(NxrProtocolError::from(error)))?;
+        self.replay.reserve(*open.nonce())?;
+        let prefix = open_authenticated_prefix(request)
+            .ok_or(NxrAuthenticationError::Protocol(NxrProtocolError::Length))?;
+        let session = NxrUdpSessionKey::derive(&self.key, prefix);
+        Ok((open, session))
+    }
 }
 
 /// One NXR landing connection: authenticate once, connect once, then relay raw
@@ -424,8 +454,31 @@ impl NxrLandingHandler {
         )
         .await?;
         let now = unix_seconds()?;
-        let destination = self.authenticator.authenticate(&request, now)?;
-        drop(authentication);
+        let flags = request
+            .get(..REQUEST_HEADER_LEN)
+            .and_then(peek_open_flags)
+            .ok_or(NxrLandingError::Protocol(NxrProtocolError::Version))?;
+        match flags {
+            FLAG_TCP => {
+                let destination = self.authenticator.authenticate(&request, now)?;
+                drop(authentication);
+                self.handle_tcp_relay(inbound, destination).await
+            }
+            FLAG_UDP => {
+                let (open, session) = self.authenticator.authenticate_udp(&request, now)?;
+                drop(authentication);
+                self.handle_udp_association(inbound, open.destination().clone(), session)
+                    .await
+            }
+            _ => Err(NxrLandingError::Protocol(NxrProtocolError::Flags)),
+        }
+    }
+
+    async fn handle_tcp_relay(
+        &self,
+        inbound: TcpStream,
+        destination: Destination,
+    ) -> Result<RelayStats, NxrLandingError> {
         // The descriptor unit is reserved before connect(2) and outlives the
         // relay: the outbound socket closes before its unit is released.
         let connected = self
@@ -437,10 +490,6 @@ impl NxrLandingHandler {
                 error => NxrLandingError::Destination(error),
             })?;
         let (outbound, _fd_permit) = connected.into_parts();
-        // The landing handler owns both complete sockets, so every backend,
-        // including those that must duplicate or register a descriptor, is
-        // eligible for this path. Bound blocked writes without expiring a
-        // quiet direction or truncating the opposite direction after FIN.
         let outcome = self
             .relay
             .relay_owned(
@@ -454,6 +503,113 @@ impl NxrLandingHandler {
             outcome.inbound_to_outbound(),
             outcome.outbound_to_inbound(),
         ))
+    }
+
+    /// Authenticated NXR UDP association: framed datagrams on `inbound`, UDP
+    /// sockets owned here. Destination changes are accepted only when covered
+    /// by the session MAC (LINE is routing authority).
+    async fn handle_udp_association(
+        &self,
+        mut inbound: TcpStream,
+        initial_destination: Destination,
+        session: NxrUdpSessionKey,
+    ) -> Result<RelayStats, NxrLandingError> {
+        let mut current = socket_addr_for_udp(&initial_destination)?;
+        let udp = UdpSocket::bind(std::net::SocketAddr::from(([0, 0, 0, 0], 0)))
+            .await
+            .map_err(NxrLandingError::UdpIo)?;
+        // Charge one outbound FD unit for the UDP socket for the association life.
+        let _udp_permit = self
+            .relay
+            .fd_budget()
+            .try_acquire(crate::transport::UNITS_OUTBOUND_SOCKET)
+            .ok_or(NxrLandingError::DescriptorBudget)?;
+
+        let mut inbound_buf = Vec::new();
+        let mut udp_buf = vec![0_u8; 64 * 1024];
+        let mut frame_out = Vec::new();
+        let mut seq_in = NxrUdpSeq::new();
+        let mut seq_out = NxrUdpSeq::new();
+        let mut uplink = 0_u64;
+        let mut downlink = 0_u64;
+        let idle = Duration::from_secs(60);
+
+        loop {
+            tokio::select! {
+                biased;
+                read = inbound.read_buf(&mut inbound_buf) => {
+                    let n = read.map_err(NxrLandingError::Read)?;
+                    if n == 0 {
+                        break;
+                    }
+                    if inbound_buf.len() > MAX_FRAME_BUFFER {
+                        return Err(NxrLandingError::UdpProtocol(NxrUdpError::Length));
+                    }
+                    let frames = drain_frames(
+                        &mut inbound_buf,
+                        &session,
+                        DIR_LINE_TO_LANDING,
+                    )
+                    .map_err(NxrLandingError::UdpProtocol)?;
+                    for frame in frames {
+                        seq_in.accept_in(frame.seq).map_err(NxrLandingError::UdpProtocol)?;
+                        if frame.frame_type == FRAME_TYPE_CLOSE {
+                            return Ok(RelayStats::new(uplink, downlink));
+                        }
+                        if frame.frame_type != FRAME_TYPE_DATAGRAM {
+                            return Err(NxrLandingError::UdpProtocol(NxrUdpError::FrameType));
+                        }
+                        if let Some(dest) = frame.destination.as_ref() {
+                            current = socket_addr_for_udp(dest)?;
+                        }
+                        if frame.payload.len() > NXR_UDP_MAX_PAYLOAD {
+                            return Err(NxrLandingError::UdpProtocol(NxrUdpError::Payload));
+                        }
+                        if !frame.payload.is_empty() {
+                            udp.send_to(&frame.payload, current)
+                                .await
+                                .map_err(NxrLandingError::UdpIo)?;
+                            uplink = uplink.saturating_add(frame.payload.len() as u64);
+                        }
+                    }
+                }
+                recv = udp.recv_from(&mut udp_buf) => {
+                    let (n, _from) = recv.map_err(NxrLandingError::UdpIo)?;
+                    let payload = &udp_buf[..n.min(NXR_UDP_MAX_PAYLOAD)];
+                    let seq = seq_out.next_out();
+                    encode_frame(
+                        &session,
+                        DIR_LANDING_TO_LINE,
+                        FRAME_TYPE_DATAGRAM,
+                        seq,
+                        None,
+                        payload,
+                        &mut frame_out,
+                    )
+                    .map_err(NxrLandingError::UdpProtocol)?;
+                    inbound
+                        .write_all(&frame_out)
+                        .await
+                        .map_err(NxrLandingError::UdpIo)?;
+                    downlink = downlink.saturating_add(payload.len() as u64);
+                }
+                () = tokio::time::sleep(idle) => {
+                    break;
+                }
+            }
+        }
+        Ok(RelayStats::new(uplink, downlink))
+    }
+}
+
+/// Bound on unreassembled TCP buffer bytes for NXR UDP framing.
+const MAX_FRAME_BUFFER: usize = 256 * 1024;
+
+fn socket_addr_for_udp(destination: &Destination) -> Result<std::net::SocketAddr, NxrLandingError> {
+    match destination.address() {
+        Address::Ipv4(addr) => Ok(std::net::SocketAddr::from((*addr, destination.port()))),
+        Address::Ipv6(addr) => Ok(std::net::SocketAddr::from((*addr, destination.port()))),
+        Address::Domain(_) => Err(NxrLandingError::UdpProtocol(NxrUdpError::Address)),
     }
 }
 
@@ -494,7 +650,11 @@ async fn read_request_after_first(
     let mut header = [0_u8; REQUEST_HEADER_LEN];
     header[0] = first_byte;
     read_exact_before(stream, &mut header[1..], deadline).await?;
-    let total = request_len_from_header(&header).map_err(NxrLandingError::Protocol)?;
+    let total = match peek_open_flags(&header) {
+        Some(FLAG_UDP) => udp_open_len_from_header(&header)
+            .map_err(|error| NxrLandingError::Protocol(NxrProtocolError::from(error)))?,
+        _ => request_len_from_header(&header).map_err(NxrLandingError::Protocol)?,
+    };
     let mut request = Vec::new();
     request
         .try_reserve_exact(total)
@@ -592,6 +752,10 @@ pub enum NxrLandingError {
     Destination(DestinationConnectError),
     Relay(io::Error),
     DescriptorBudget,
+    /// UDP socket I/O on the NXR UDP association path.
+    UdpIo(io::Error),
+    /// NXR UDP framing / session protocol failure.
+    UdpProtocol(NxrUdpError),
 }
 
 impl NxrLandingError {
@@ -618,8 +782,9 @@ impl Error for NxrLandingError {
         match self {
             Self::DescriptorBudget => None,
             Self::Admission(source) => Some(source),
-            Self::Read(source) | Self::Relay(source) => Some(source),
+            Self::Read(source) | Self::Relay(source) | Self::UdpIo(source) => Some(source),
             Self::Protocol(source) => Some(source),
+            Self::UdpProtocol(source) => Some(source),
             Self::Authentication(source) => Some(source),
             Self::Destination(source) => Some(source),
             Self::Reclaimed
@@ -968,5 +1133,169 @@ mod tests {
         assert_eq!(target.expect("target must succeed"), REQUEST);
         assert_eq!(stats.inbound_to_outbound_bytes(), REQUEST.len() as u64);
         assert_eq!(stats.outbound_to_inbound_bytes(), RESPONSE.len() as u64);
+    }
+}
+
+#[cfg(test)]
+mod udp_association_tests {
+    use std::{net::Ipv4Addr, time::Duration};
+
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream, UdpSocket},
+        time,
+    };
+
+    use super::{NxrAuthenticator, NxrLandingHandler, NxrReplayCache};
+    use crate::{
+        protocol::{
+            nxr::NxrKey,
+            nxr_udp::{
+                DIR_LANDING_TO_LINE, DIR_LINE_TO_LANDING, FRAME_TYPE_DATAGRAM, NxrUdpSeq,
+                NxrUdpSessionKey, drain_frames, encode_frame, encode_udp_open,
+                open_authenticated_prefix,
+            },
+            vless::{Address, Destination},
+        },
+        transport::{TcpRelay, TcpRelayConfig},
+    };
+
+    fn landing_handler(key: [u8; 32]) -> NxrLandingHandler {
+        let relay = TcpRelay::new(
+            TcpRelayConfig::for_test(),
+            crate::transport::FdBudget::new(4_096),
+        )
+        .expect("relay");
+        let cache =
+            NxrReplayCache::new(8, Duration::from_secs(60)).expect("cache policy must compile");
+        NxrLandingHandler::new(
+            NxrAuthenticator::new(NxrKey::new(key), cache, 30),
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+            relay,
+            Duration::from_secs(5),
+        )
+    }
+
+    #[tokio::test]
+    async fn nxr_udp_landing_echo_round_trip() {
+        let key_bytes = [0x42_u8; 32];
+        let key = NxrKey::new(key_bytes);
+        let echo = UdpSocket::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let echo_addr = echo.local_addr().unwrap();
+        let dest = Destination::new(Address::Ipv4(Ipv4Addr::new(127, 0, 0, 1)), echo_addr.port());
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let land_addr = listener.local_addr().unwrap();
+        let handler = landing_handler(key_bytes);
+        let land_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handler.handle(stream).await
+        });
+
+        let mut client = TcpStream::connect(land_addr).await.unwrap();
+        let mut open = Vec::new();
+        encode_udp_open(
+            &dest,
+            [0x11; 16],
+            super::unix_seconds().unwrap(),
+            [0x99; 16],
+            &key,
+            &mut open,
+        )
+        .unwrap();
+        client.write_all(&open).await.unwrap();
+        let session = NxrUdpSessionKey::derive(&key, open_authenticated_prefix(&open).unwrap());
+
+        let mut seq_out = NxrUdpSeq::new();
+        let mut frame = Vec::new();
+        encode_frame(
+            &session,
+            DIR_LINE_TO_LANDING,
+            FRAME_TYPE_DATAGRAM,
+            seq_out.next_out(),
+            Some(&dest),
+            b"hello-nxr-udp",
+            &mut frame,
+        )
+        .unwrap();
+        client.write_all(&frame).await.unwrap();
+
+        let mut buf = [0_u8; 64];
+        let (n, from) = time::timeout(Duration::from_secs(2), echo.recv_from(&mut buf))
+            .await
+            .expect("echo recv")
+            .unwrap();
+        assert_eq!(&buf[..n], b"hello-nxr-udp");
+        echo.send_to(b"echo-ok", from).await.unwrap();
+
+        let mut reply_buf = vec![0_u8; 0];
+        // Read until one complete frame arrives.
+        let mut scratch = [0_u8; 4096];
+        let deadline = time::Instant::now() + Duration::from_secs(2);
+        let mut seq_in = NxrUdpSeq::new();
+        let reply = loop {
+            let n = time::timeout_at(deadline, client.read(&mut scratch))
+                .await
+                .expect("reply read timeout")
+                .unwrap();
+            assert!(n > 0);
+            reply_buf.extend_from_slice(&scratch[..n]);
+            let frames = drain_frames(&mut reply_buf, &session, DIR_LANDING_TO_LINE).unwrap();
+            if let Some(frame) = frames.into_iter().next() {
+                seq_in.accept_in(frame.seq).unwrap();
+                break frame;
+            }
+        };
+        assert_eq!(reply.payload, b"echo-ok");
+
+        land_task.abort();
+    }
+
+    #[tokio::test]
+    async fn tcp_open_still_relays_bytes() {
+        // Non-regression: TCP NXR path unchanged.
+        let key_bytes = [0x33_u8; 32];
+        let key = NxrKey::new(key_bytes);
+        let dest_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let dest_addr = dest_listener.local_addr().unwrap();
+        let dest = Destination::new(Address::Ipv4(Ipv4Addr::new(127, 0, 0, 1)), dest_addr.port());
+        let dest_task = tokio::spawn(async move {
+            let (mut stream, _) = dest_listener.accept().await.unwrap();
+            let mut buf = [0_u8; 16];
+            let n = stream.read(&mut buf).await.unwrap();
+            stream.write_all(&buf[..n]).await.unwrap();
+        });
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let land_addr = listener.local_addr().unwrap();
+        let handler = landing_handler(key_bytes);
+        let land_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handler.handle(stream).await
+        });
+
+        let mut client = TcpStream::connect(land_addr).await.unwrap();
+        let mut open = Vec::new();
+        crate::protocol::nxr::encode_request(
+            &dest,
+            super::unix_seconds().unwrap(),
+            [0x22; 16],
+            &key,
+            &mut open,
+        )
+        .unwrap();
+        client.write_all(&open).await.unwrap();
+        client.write_all(b"tcp-payload").await.unwrap();
+        let mut buf = [0_u8; 16];
+        let n = time::timeout(Duration::from_secs(2), client.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&buf[..n], b"tcp-payload");
+        dest_task.await.unwrap();
+        land_task.abort();
     }
 }

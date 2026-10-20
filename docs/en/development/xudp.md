@@ -16,7 +16,7 @@ See Issue [#254](https://github.com/jacek4yang/rust-reality/issues/254) for pin 
 | Outbound | UDP via XUDP |
 | --- | --- |
 | Direct | Supported (local Direct UDP sockets) |
-| NXR | **Authorized** as a distinct egress capability ([ADR 0060](../../adr/0060-xudp-over-nxr-and-handoff.md)); landward NXR UDP forwarding is wired in follow-up PRs. Until then the Vision session fails closed **after** authorization — it must **not** open Direct sockets for an NXR route. |
+| NXR | **Authorized** as a distinct egress capability ([ADR 0060](../../adr/0060-xudp-over-nxr-and-handoff.md)). Landward carrier: authenticated `FLAG_UDP` open + length-prefixed session-MAC frames over LINE→LANDING TCP (`protocol::nxr_udp`). LANDING owns UDP sockets. Vision→NXR session wiring continues in follow-up PRs; until wired, Vision still fails closed after authorization without opening Direct sockets. |
 | Handoff | **Authorized** as a distinct egress capability ([ADR 0060](../../adr/0060-xudp-over-nxr-and-handoff.md)); landward Handoff UDP forwarding is wired in follow-up PRs. Same no-silent-Direct rule. |
 | Block | Rejected by routing / authorization as usual |
 | Other (e.g. SOCKS5) | Fail closed (`Unsupported`) |
