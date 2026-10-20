@@ -61,6 +61,7 @@ tests from earlier PRs:
 | UDP/443 policy | Without `allowUdp443`, UDP/443 fails closed; with it, XUDP may carry 443 |
 | Framing fuzz | `fuzz_decode_xudp_packet` remains in the wire-parser fuzz shard |
 | Route fail-closed | Block/unknown reject at authorize; NXR/Handoff are distinct capabilities and must not silently become Direct |
+| NXR UDP E2E (PR3) | rust↔rust and stock Xray Client → LINE → NXR LANDING → UDP echo; LANDING source `127.0.0.2` proof; multi-dest Keep; Block → zero packets; genuine Quinn+h3 UDP/443 via NXR; `allowUdp443` policy; Handoff still fail-closed |
 
 This is **not** native QUIC transport. QUIC/443 traffic, when permitted, is still
 UDP datagrams inside Vision/XUDP over the existing REALITY LINE.
