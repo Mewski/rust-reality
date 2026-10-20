@@ -67,9 +67,7 @@ fn bind_udp443() -> StdUdpSocket {
     loop {
         match StdUdpSocket::bind(DEST_443) {
             Ok(sock) => return sock,
-            Err(err)
-                if err.kind() == ErrorKind::AddrInUse && Instant::now() < deadline =>
-            {
+            Err(err) if err.kind() == ErrorKind::AddrInUse && Instant::now() < deadline => {
                 eprintln!("UDP/443 still in use ({err}); retrying");
                 thread::sleep(Duration::from_millis(100));
             }
@@ -86,9 +84,7 @@ fn bind_tcp443() -> TcpListener {
     loop {
         match TcpListener::bind(DEST_443) {
             Ok(sock) => return sock,
-            Err(err)
-                if err.kind() == ErrorKind::AddrInUse && Instant::now() < deadline =>
-            {
+            Err(err) if err.kind() == ErrorKind::AddrInUse && Instant::now() < deadline => {
                 eprintln!("TCP/443 still in use ({err}); retrying");
                 thread::sleep(Duration::from_millis(100));
             }
@@ -1212,7 +1208,11 @@ async fn genuine_http3_over_nxr_xudp_udp443_no_tcp_fallback() {
     req_res.expect("H3 requests");
     let handled = server_task.await.expect("server task");
     assert!(handled >= 3, "origin handled {handled}");
-    assert_eq!(watchdog.hits.load(Ordering::SeqCst), 0, "TCP fallback on :443");
+    assert_eq!(
+        watchdog.hits.load(Ordering::SeqCst),
+        0,
+        "TCP fallback on :443"
+    );
     let peers = origin_peers.lock().unwrap().clone();
     assert!(
         peers
@@ -1639,7 +1639,11 @@ async fn genuine_http3_over_handoff_xudp_udp443_no_tcp_fallback() {
     req_res.expect("H3 requests");
     let handled = server_task.await.expect("server task");
     assert!(handled >= 3, "origin handled {handled}");
-    assert_eq!(watchdog.hits.load(Ordering::SeqCst), 0, "TCP fallback on :443");
+    assert_eq!(
+        watchdog.hits.load(Ordering::SeqCst),
+        0,
+        "TCP fallback on :443"
+    );
     let peers = origin_peers.lock().unwrap().clone();
     assert!(
         peers
@@ -1909,7 +1913,11 @@ async fn stock_xray_client_handoff_genuine_http3_udp443() {
     req_res.expect("H3 request");
     let handled = server_task.await.expect("server task");
     assert!(handled >= 1, "origin handled {handled}");
-    assert_eq!(watchdog.hits.load(Ordering::SeqCst), 0, "TCP fallback on :443");
+    assert_eq!(
+        watchdog.hits.load(Ordering::SeqCst),
+        0,
+        "TCP fallback on :443"
+    );
     let peers = origin_peers.lock().unwrap().clone();
     assert!(
         peers

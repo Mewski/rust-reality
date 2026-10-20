@@ -417,9 +417,7 @@ fn bind_udp(addr: SocketAddr) -> StdUdpSocket {
     loop {
         match StdUdpSocket::bind(addr) {
             Ok(sock) => return sock,
-            Err(err)
-                if err.kind() == ErrorKind::AddrInUse && Instant::now() < deadline =>
-            {
+            Err(err) if err.kind() == ErrorKind::AddrInUse && Instant::now() < deadline => {
                 eprintln!("bind {addr} still in use ({err}); retrying");
                 thread::sleep(Duration::from_millis(100));
             }
