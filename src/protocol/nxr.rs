@@ -9,7 +9,6 @@ use super::vless::{Address, Destination};
 type NxrHmac = Hmac<Sha256>;
 
 const MAGIC: [u8; 4] = [b'N', b'X', b'R', 1];
-const FLAGS: u8 = 0;
 const ADDRESS_IPV4: u8 = 1;
 const ADDRESS_DOMAIN: u8 = 2;
 const ADDRESS_IPV6: u8 = 3;
@@ -59,6 +58,47 @@ impl NxrKey {
     fn mac(&self) -> NxrHmac {
         self.0.clone()
     }
+
+    /// Raw `HMAC-SHA256(psk, message)` — used for open tags (TCP and UDP).
+    #[must_use]
+    pub fn tag(&self, message: &[u8]) -> [u8; TAG_LEN] {
+        let mut mac = self.mac();
+        mac.update(message);
+        mac.finalize().into_bytes().into()
+    }
+
+    /// Domain-separated HMAC derivation used by NXR UDP session MACs (ADR 0060).
+    ///
+    /// Computes `HMAC-SHA256(psk, label || data)`. Labels must be unique per
+    /// purpose so TCP open tags and UDP session keys cannot be confused.
+    #[must_use]
+    pub fn derive(&self, label: &[u8], data: &[u8]) -> [u8; TAG_LEN] {
+        let mut mac = self.mac();
+        mac.update(label);
+        mac.update(data);
+        mac.finalize().into_bytes().into()
+    }
+}
+
+/// Fixed header flag byte offset (after 4-byte magic).
+pub const FLAGS_OFFSET: usize = 4;
+
+/// TCP connect mode (historical NXR open).
+pub const FLAG_TCP: u8 = 0;
+
+/// UDP/XUDP association mode (ADR 0060 Option A). Distinct from [`FLAG_TCP`] so
+/// a UDP open cannot be interpreted as a TCP open byte-for-byte.
+pub const FLAG_UDP: u8 = 1;
+
+/// Returns the open-mode flag when the fixed header is present.
+///
+/// Does not authenticate. Callers still must run the matching decode path.
+#[must_use]
+pub fn peek_open_flags(header: &[u8]) -> Option<u8> {
+    if header.len() < REQUEST_HEADER_LEN || header[..MAGIC.len()] != MAGIC {
+        return None;
+    }
+    Some(header[FLAGS_OFFSET])
 }
 
 impl fmt::Debug for NxrKey {
@@ -103,9 +143,11 @@ impl AuthenticatedRequest {
 
 /// Encodes one complete NXR authentication request.
 ///
-/// The HMAC covers the version, flags, address type and length, port, timestamp,
-/// nonce, and destination address. No framing follows this request: the next byte
-/// on the connection is raw user payload.
+/// The HMAC covers the version, TCP flags (`0`), address type and length, port,
+/// timestamp, nonce, and destination address. No framing follows this request:
+/// the next byte on the connection is raw user TCP payload.
+///
+/// UDP association opens use [`crate::protocol::nxr_udp`] instead (`FLAG_UDP`).
 ///
 /// # Errors
 ///
@@ -134,7 +176,7 @@ pub fn encode_request(
         .try_reserve_exact(total)
         .map_err(|_| NxrProtocolError::Allocation)?;
     output.extend_from_slice(&MAGIC);
-    output.push(FLAGS);
+    output.push(FLAG_TCP);
     output.push(address_type);
     output.extend_from_slice(&address_len.to_be_bytes());
     output.extend_from_slice(&destination.port().to_be_bytes());
@@ -166,7 +208,7 @@ pub fn request_len_from_header(header: &[u8]) -> Result<usize, NxrProtocolError>
     if header[..MAGIC.len()] != MAGIC {
         return Err(NxrProtocolError::Version);
     }
-    if header[4] != FLAGS {
+    if header[4] != FLAG_TCP {
         return Err(NxrProtocolError::Flags);
     }
     let address_len = usize::from(u16::from_be_bytes([

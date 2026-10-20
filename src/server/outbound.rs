@@ -20,6 +20,7 @@ use crate::{
     network::NetworkEnvironment,
     protocol::{
         nxr::{NxrKey, NxrProtocolError, encode_request},
+        nxr_udp::encode_udp_open,
         vless::{Address, Destination},
     },
     runtime::{AdmissionDenied, DirectBarrier},
@@ -892,6 +893,81 @@ fn fresh_nxr_request(
     encode_request(destination, timestamp, nonce, &settings.key, &mut request)
         .map_err(OutboundConnectError::NxrProtocol)?;
     Ok(request)
+}
+
+/// Builds one UDP-mode NXR open (ADR 0060). Does not dial; used by LINE when
+/// Vision routes XUDP to an NXR outbound (wired in a follow-up PR).
+#[allow(
+    dead_code,
+    reason = "Vision XUDP→NXR open helper; used by connect_nxr_udp / next PR"
+)]
+fn fresh_nxr_udp_request(
+    settings: &CompiledNxr,
+    destination: &Destination,
+    user_id: [u8; 16],
+) -> Result<Vec<u8>, OutboundConnectError> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| OutboundConnectError::NxrClock)?
+        .as_secs();
+    let mut nonce = [0_u8; 16];
+    crate::crypto::entropy::fill(&mut nonce).map_err(|_| OutboundConnectError::NxrRandom)?;
+    let mut request = Vec::new();
+    encode_udp_open(
+        destination,
+        user_id,
+        timestamp,
+        nonce,
+        &settings.key,
+        &mut request,
+    )
+    .map_err(|error| OutboundConnectError::NxrProtocol(NxrProtocolError::from(error)))?;
+    Ok(request)
+}
+
+/// Dials an NXR landing and writes one authenticated UDP-mode open.
+///
+/// Returns the connected stream ready for length-prefixed NXR UDP frames.
+#[allow(
+    dead_code,
+    reason = "Vision XUDP→NXR session wiring lands in the next PR"
+)]
+async fn connect_nxr_udp(
+    settings: &CompiledNxr,
+    destination: &Destination,
+    user_id: [u8; 16],
+    timeout: Duration,
+    connector: &DestinationConnector,
+    fd_budget: &FdBudget,
+) -> Result<PreparedConnection, OutboundConnectError> {
+    // Warm-pool sockets are TCP-open shaped today; UDP associations always dial cold
+    // so a pooled TCP open cannot be reused as a UDP association.
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or(OutboundConnectError::NxrTimeout)?;
+    let connected = time::timeout_at(
+        deadline,
+        connector.connect_host_accounted(settings.address.as_ref(), settings.port, fd_budget),
+    )
+    .await
+    .map_err(|_| OutboundConnectError::NxrTimeout)?
+    .map_err(map_nxr_connect_error)?;
+    let (mut stream, fd_permit) = connected.into_parts();
+    let request = fresh_nxr_udp_request(settings, destination, user_id)?;
+    write_all_counted_before(&mut stream, &request, deadline)
+        .await
+        .map_err(|error| {
+            let source = error.into_source();
+            if source.kind() == io::ErrorKind::TimedOut {
+                OutboundConnectError::NxrTimeout
+            } else {
+                OutboundConnectError::NxrConnect(source)
+            }
+        })?;
+    Ok(PreparedConnection {
+        connection: AccountedTcpStream::from_parts(stream, fd_permit),
+        warm_permit: None,
+    })
 }
 
 async fn connect_socks5(
