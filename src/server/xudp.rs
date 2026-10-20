@@ -177,6 +177,9 @@ pub struct XudpGlobalMap {
 struct GlobalEntry {
     expire: Instant,
     status: GlobalStatus,
+    /// Authenticated VLESS user that owns this GlobalID while it is Active
+    /// (or still Expiring pending purge). Prevents cross-user claim of a live id.
+    owner: [u8; 16],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -190,11 +193,23 @@ impl XudpGlobalMap {
         Self::default()
     }
 
-    /// Insert or refresh an active GlobalID. Returns false on capacity pressure.
-    pub fn activate(&self, id: XudpGlobalId, now: Instant) -> Result<(), XudpSessionError> {
+    /// Insert or refresh an active GlobalID for `owner`.
+    ///
+    /// Capacity [`XUDP_MAX_ASSOCIATIONS`] is process-wide. An Active (or still
+    /// Expiring) id owned by a *different* user fails closed with
+    /// [`XudpSessionError::AssociationConflict`] — no cross-user takeover.
+    pub fn activate(
+        &self,
+        id: XudpGlobalId,
+        owner: [u8; 16],
+        now: Instant,
+    ) -> Result<(), XudpSessionError> {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         self.purge_locked(&mut guard, now);
         if let Some(entry) = guard.get_mut(&id) {
+            if entry.owner != owner {
+                return Err(XudpSessionError::AssociationConflict);
+            }
             entry.status = GlobalStatus::Active;
             entry.expire = now + XUDP_ASSOCIATION_IDLE;
             return Ok(());
@@ -207,6 +222,7 @@ impl XudpGlobalMap {
             GlobalEntry {
                 expire: now + XUDP_ASSOCIATION_IDLE,
                 status: GlobalStatus::Active,
+                owner,
             },
         );
         Ok(())
@@ -267,12 +283,13 @@ impl XudpDirectAssociation {
     pub async fn open(
         destination: &Destination,
         global_id: Option<XudpGlobalId>,
+        owner: [u8; 16],
         globals: &XudpGlobalMap,
         now: Instant,
     ) -> Result<Self, XudpSessionError> {
         let addr = destination_to_socket_addr(destination)?;
         if let Some(id) = global_id {
-            globals.activate(id, now)?;
+            globals.activate(id, owner, now)?;
         }
         let bind = match addr {
             SocketAddr::V4(_) => SocketAddr::from(([0, 0, 0, 0], 0)),
@@ -442,16 +459,16 @@ mod tests {
             let mut id = [0_u8; 8];
             id[0] = (i / 256) as u8;
             id[1] = (i % 256) as u8;
-            map.activate(id, now).unwrap();
+            map.activate(id, [1; 16], now).unwrap();
         }
         assert!(matches!(
-            map.activate([0xff; 8], now),
+            map.activate([0xff; 8], [1; 16], now),
             Err(XudpSessionError::AssociationLimit)
         ));
         map.expire([0, 0, 0, 0, 0, 0, 0, 0], now);
         map.purge(now + XUDP_ASSOCIATION_IDLE + Duration::from_secs(1));
         assert!(map.len() < XUDP_MAX_ASSOCIATIONS);
-        map.activate([0xff; 8], now).unwrap();
+        map.activate([0xff; 8], [1; 16], now).unwrap();
     }
 
     #[test]
@@ -478,7 +495,7 @@ mod tests {
         let dest = socket_addr_to_destination(echo_addr);
         let globals = XudpGlobalMap::new();
         let now = Instant::now();
-        let mut assoc = XudpDirectAssociation::open(&dest, Some([9; 8]), &globals, now)
+        let mut assoc = XudpDirectAssociation::open(&dest, Some([9; 8]), [9; 16], &globals, now)
             .await
             .unwrap();
 
@@ -518,7 +535,7 @@ mod tests {
             .unwrap();
         let dest = socket_addr_to_destination(echo.local_addr().unwrap());
         let globals = XudpGlobalMap::new();
-        let mut assoc = XudpDirectAssociation::open(&dest, None, &globals, Instant::now())
+        let mut assoc = XudpDirectAssociation::open(&dest, None, [2; 16], &globals, Instant::now())
             .await
             .unwrap();
         let blocked = Destination::new(Address::Ipv4(Ipv4Addr::new(10, 0, 0, 1)), 9);
@@ -566,7 +583,7 @@ mod tests {
         let globals = XudpGlobalMap::new();
         let now = Instant::now();
         let gid = [7_u8; 8];
-        let assoc = XudpDirectAssociation::open(&dest, Some(gid), &globals, now)
+        let assoc = XudpDirectAssociation::open(&dest, Some(gid), [7; 16], &globals, now)
             .await
             .unwrap();
         assert_eq!(globals.len(), 1);
@@ -574,10 +591,28 @@ mod tests {
         assoc.close(&globals, now);
         globals.purge(now + XUDP_ASSOCIATION_IDLE + Duration::from_secs(1));
         assert_eq!(globals.len(), 0);
-        let again = XudpDirectAssociation::open(&dest, Some(gid), &globals, now)
+        let again = XudpDirectAssociation::open(&dest, Some(gid), [7; 16], &globals, now)
             .await
             .unwrap();
         assert_eq!(globals.len(), 1);
         again.close(&globals, now);
+    }
+
+    #[test]
+    fn global_id_rejects_cross_user_claim_while_active() {
+        let map = XudpGlobalMap::new();
+        let now = Instant::now();
+        let gid = [0x42_u8; 8];
+        map.activate(gid, [1; 16], now).unwrap();
+        assert!(matches!(
+            map.activate(gid, [2; 16], now),
+            Err(XudpSessionError::AssociationConflict)
+        ));
+        // Same owner may refresh.
+        map.activate(gid, [1; 16], now).unwrap();
+        map.expire(gid, now);
+        map.purge(now + XUDP_ASSOCIATION_IDLE + Duration::from_secs(1));
+        // After purge, a different user may claim the id.
+        map.activate(gid, [2; 16], now).unwrap();
     }
 }

@@ -246,6 +246,41 @@ jobs:
             printf 'verdict=PASS\n'
             grep -E 'test result:|genuine_http3|udp443_|ALPN|h3-origin handled' "$LOG" | tail -n40
           } | tee "$Q/quic-h3-udp443/receipt.txt"
+      - name: Mandatory adversarial XUDP lifecycle and routing
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          # FINAL MISSION Q3: rewrite security, GlobalID ownership/capacity,
+          # incomplete-frame progress, payload bounds, cancel/recovery,
+          # malformed + pressure, fail-detection demos. Fail closed.
+          mkdir -p "$Q/xudp-adversarial"
+          {
+            printf 'source=%s\nrun=%s\nattempt=%s\n' \
+              "$HEAD_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf 'gate=mandatory-xudp-adversarial-lifecycle\n'
+            printf 'require=library process-level adversarial suite\n'
+          } | tee "$Q/xudp-adversarial/identity.txt"
+          LOG="$Q/xudp-adversarial/cargo-test.log"
+          set +e
+          cargo test --locked --test xudp_adversarial_lifecycle -- --nocapture 2>&1 | tee "$LOG"
+          status=${PIPESTATUS[0]}
+          set -e
+          if ! grep -E 'test result: ok\.' "$LOG"; then
+            printf '%s\n' 'FAIL: adversarial XUDP suite did not report ok' >&2
+            exit 1
+          fi
+          # Fail closed on zero matched / ignored-as-pass patterns.
+          # Require a digit-bounded "0 passed" so "10 passed" does not match.
+          if grep -E 'test result:.*[^0-9]0 passed' "$LOG"; then
+            printf '%s\n' 'FAIL: adversarial XUDP suite passed zero cases' >&2
+            exit 1
+          fi
+          test "$status" -eq 0
+          {
+            printf 'verdict=PASS\n'
+            printf 'status=%s\n' "$status"
+            grep -E 'test result:| PASS$' "$LOG" | tail -n40
+          } | tee "$Q/xudp-adversarial/receipt.txt"
       - name: Unmodified Xray REALITY and Vision interoperability
         timeout-minutes: 5
         run: |
@@ -293,6 +328,8 @@ jobs:
               'stock-xray-xudp/cargo-test.log',
               'quic-h3-udp443/identity.txt', 'quic-h3-udp443/receipt.txt',
               'quic-h3-udp443/cargo-test.log',
+              'xudp-adversarial/identity.txt', 'xudp-adversarial/receipt.txt',
+              'xudp-adversarial/cargo-test.log',
               'interop/summary.json', 'interop/environment.json', 'interop/completion.json',
               'interop/certificate-san.txt',
               'pressure/pressure-result.json', 'pressure/gate-summary.json',

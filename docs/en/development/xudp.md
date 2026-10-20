@@ -108,3 +108,21 @@ Directional contract (AGENTS.md §6, ADR 0059):
   capped at stock `buf.Size - 666` (7526); encode is failure-atomic.
   Association limits: `XUDP_MAX_ASSOCIATIONS`, idle expire, FD budgets;
   control EOF ends SOCKS5 UDP ASSOCIATE.
+
+## Adversarial lifecycle and routing (Q3)
+
+Exact-head Native runs `tests/xudp_adversarial_lifecycle.rs` as a mandatory
+gate (`xudp-adversarial` evidence). It proves:
+
+| Gate | Evidence |
+| --- | --- |
+| Destination rewrite security | Direct→Block/NXR/Handoff rejects; zero datagrams to a forbidden destination when authorization is withheld |
+| GlobalID ownership | Active id cannot be claimed by a different VLESS user (`AssociationConflict`); capacity is process-wide (`XUDP_MAX_ASSOCIATIONS`) |
+| Incomplete-frame progress | Truncated buffers retain bytes and require another read (no busy-spin) |
+| Payload boundaries | Exact `XUDP_MAX_PAYLOAD_LEN` (7526) encodes; oversize fails closed and is failure-atomic |
+| Cancel / recovery | `close` → expire → purge frees the GlobalID; same owner may reopen |
+| Malformed + pressure | Codec rejects malformed prefixes; association limit under pressure then recovers |
+| Fail-detection demos | UnauthorizedRewrite and Direct-only route-class gates must remain present |
+
+Rust Client → stock Xray Server remains **not required** (ADR 0059).
+
