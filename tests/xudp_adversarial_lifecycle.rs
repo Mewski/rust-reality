@@ -32,13 +32,20 @@ fn dest_ip(ip: [u8; 4], port: u16) -> Destination {
     Destination::new(Address::Ipv4(Ipv4Addr::from(ip)), port)
 }
 
-fn packet_new(dest: &Destination, payload: &[u8], gid: Option<[u8; 8]>) -> rust_reality::protocol::vless::XudpPacket {
+fn packet_new(
+    dest: &Destination,
+    payload: &[u8],
+    gid: Option<[u8; 8]>,
+) -> rust_reality::protocol::vless::XudpPacket {
     let mut wire = Vec::new();
     encode_xudp_packet(dest, payload, true, gid, false, &mut wire).expect("encode New");
     decode_xudp_packet(&wire).expect("decode New").0
 }
 
-fn packet_keep_rewrite(dest: &Destination, payload: &[u8]) -> rust_reality::protocol::vless::XudpPacket {
+fn packet_keep_rewrite(
+    dest: &Destination,
+    payload: &[u8],
+) -> rust_reality::protocol::vless::XudpPacket {
     let mut wire = Vec::new();
     encode_xudp_packet(dest, payload, false, None, true, &mut wire).expect("encode Keep rewrite");
     decode_xudp_packet(&wire).expect("decode Keep").0
@@ -68,15 +75,10 @@ async fn rewrite_direct_to_block_rejects_and_sends_zero_datagrams() {
 
     let globals = XudpGlobalMap::new();
     let owner = [0x11; 16];
-    let mut assoc = XudpDirectAssociation::open(
-        &allowed_dest,
-        Some([1; 8]),
-        owner,
-        &globals,
-        Instant::now(),
-    )
-    .await
-    .unwrap();
+    let mut assoc =
+        XudpDirectAssociation::open(&allowed_dest, Some([1; 8]), owner, &globals, Instant::now())
+            .await
+            .unwrap();
 
     // Opening New to Direct is fine.
     let open = packet_new(&allowed_dest, b"open-ok", Some([1; 8]));
@@ -107,12 +109,18 @@ async fn rewrite_direct_to_block_rejects_and_sends_zero_datagrams() {
         .await
         .expect_err("unauthorized rewrite must fail closed");
     assert!(matches!(err, XudpSessionError::UnauthorizedRewrite));
-    assert_eq!(assoc.uplink_datagrams(), 1, "only the Direct open may count");
+    assert_eq!(
+        assoc.uplink_datagrams(),
+        1,
+        "only the Direct open may count"
+    );
 
     let mut stray = [0u8; 64];
     match tokio::time::timeout(Duration::from_millis(200), forbidden.recv_from(&mut stray)).await {
         Err(_) => {} // expected: nothing arrives
-        Ok(Ok((n, from))) => panic!("forbidden dest must receive zero datagrams, got {n} bytes from {from}"),
+        Ok(Ok((n, from))) => {
+            panic!("forbidden dest must receive zero datagrams, got {n} bytes from {from}")
+        }
         Ok(Err(e)) => panic!("forbidden dest recv error: {e}"),
     }
     assoc.close(&globals, Instant::now());
@@ -179,7 +187,10 @@ fn incomplete_frame_progress_requires_more_bytes() {
     let cut = frame.len() - 4;
     let mut buffer = frame[..cut].to_vec();
     let drained = drain_xudp_frames(&mut buffer).unwrap();
-    assert!(drained.is_empty(), "truncated prefix must not yield a packet");
+    assert!(
+        drained.is_empty(),
+        "truncated prefix must not yield a packet"
+    );
     assert_eq!(buffer.len(), cut, "truncated bytes must be retained");
 
     // Decision: incomplete ⇒ need another read (not "ready").
@@ -301,10 +312,9 @@ async fn fail_detection_demo_unauthorized_rewrite_gate() {
         .unwrap();
     let dest = dest_ip([127, 0, 0, 1], echo.local_addr().unwrap().port());
     let globals = XudpGlobalMap::new();
-    let mut assoc =
-        XudpDirectAssociation::open(&dest, None, [0xFD; 16], &globals, Instant::now())
-            .await
-            .unwrap();
+    let mut assoc = XudpDirectAssociation::open(&dest, None, [0xFD; 16], &globals, Instant::now())
+        .await
+        .unwrap();
     let blocked = dest_ip([203, 0, 113, 1], 9); // TEST-NET-3
     let rewrite = packet_keep_rewrite(&blocked, b"should-not-leave");
     assert!(rewrite.destination.is_some());
