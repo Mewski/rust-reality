@@ -46,8 +46,9 @@ use super::{
     reality::RealityEstablished,
     routing::{AssetMatcher, RouteResolutionError, RoutingCompileError, RoutingTable},
     xudp::{
-        XUDP_ASSOCIATION_IDLE, XudpDirectAssociation, XudpSessionError, drain_xudp_frames,
-        process_xudp_global_map, require_direct_xudp_route,
+        XUDP_ASSOCIATION_IDLE, XudpDirectAssociation, XudpEgressCapability, XudpSessionError,
+        authorize_xudp_egress, drain_xudp_frames, process_xudp_global_map,
+        require_direct_xudp_landward,
     },
 };
 use crate::config::node::entry::EntryConfig;
@@ -481,16 +482,19 @@ impl VisionHandler {
         Ok(session_stats(uplink, downlink))
     }
 
-    /// Authorize an XUDP New/Keep destination: canonical routing, DNS, Direct-only.
+    /// Authorize an XUDP New/Keep destination: canonical routing, DNS, egress class.
     ///
-    /// Keep rewrites MUST call this again; a prior Direct decision must not be
-    /// inherited when the new destination routes to Block/Handoff/NXR.
+    /// Keep rewrites MUST call this again; a prior decision must not be inherited
+    /// when the new destination routes to Block or another outbound. Returns a
+    /// distinct [`XudpEgressCapability`] (Direct / NXR / Handoff) — never remaps
+    /// NXR/Handoff to Direct (ADR 0060).
     pub(crate) async fn authorize_xudp_destination(
         &self,
         user_id: UserId,
         inbound_tag: &str,
         dest: &crate::protocol::vless::Destination,
-    ) -> Result<crate::protocol::vless::Destination, VisionSessionError> {
+    ) -> Result<(XudpEgressCapability, crate::protocol::vless::Destination), VisionSessionError>
+    {
         let route = self
             .routing
             .select_with_dns(
@@ -502,10 +506,11 @@ impl VisionHandler {
             )
             .await
             .map_err(VisionSessionError::Route)?;
-        require_direct_xudp_route(self.outbounds.xudp_route_class(route.decision().outbound()))
-            .map_err(|error| VisionSessionError::Xudp(XudpSessionError::Outbound(error)))?;
-        if let Some(ip) = route.resolved_ips().first().copied() {
-            Ok(match ip {
+        let capability =
+            authorize_xudp_egress(self.outbounds.xudp_route_class(route.decision().outbound()))
+                .map_err(|error| VisionSessionError::Xudp(XudpSessionError::Outbound(error)))?;
+        let resolved = if let Some(ip) = route.resolved_ips().first().copied() {
+            match ip {
                 IpAddr::V4(v4) => crate::protocol::vless::Destination::new(
                     crate::protocol::vless::Address::Ipv4(v4),
                     dest.port(),
@@ -514,16 +519,20 @@ impl VisionHandler {
                     crate::protocol::vless::Address::Ipv6(v6),
                     dest.port(),
                 ),
-            })
+            }
         } else {
-            Ok(dest.clone())
-        }
+            dest.clone()
+        };
+        Ok((capability, resolved))
     }
 
     /// Serves one REALITY-authenticated Vision **XUDP** (Mux) session.
     ///
-    /// XUDP frames ride inside Vision padding. Only **Direct** UDP egress is
-    /// supported; NXR/Handoff/Block routes fail closed with an explicit error.
+    /// XUDP frames ride inside Vision padding. Routing may authorize Direct,
+    /// NXR, or Handoff (ADR 0060). This handler only opens **Direct** landward
+    /// UDP sockets today; NXR/Handoff fail closed after authorization until
+    /// landward forwarding lands (no silent Direct fallback). Block/unknown
+    /// remain fail-closed at authorization.
     async fn handle_xudp(
         &self,
         mut client_reader: TlsApplicationReader<OwnedReadHalf>,
@@ -593,10 +602,14 @@ impl VisionHandler {
         loop {
             for packet in packets.drain(..) {
                 let authorized = if let Some(dest) = packet.destination.as_ref() {
-                    Some(
-                        self.authorize_xudp_destination(user_id, inbound_tag, dest)
-                            .await?,
-                    )
+                    let (capability, resolved) = self
+                        .authorize_xudp_destination(user_id, inbound_tag, dest)
+                        .await?;
+                    // PR1: Direct landward only; NXR/Handoff authorized but not wired.
+                    require_direct_xudp_landward(capability).map_err(|error| {
+                        VisionSessionError::Xudp(XudpSessionError::Outbound(error))
+                    })?;
+                    Some(resolved)
                 } else {
                     None
                 };
@@ -683,14 +696,17 @@ impl VisionHandler {
                             for packet in more {
                                 let authorized = if let Some(dest) = packet.destination.as_ref()
                                 {
-                                    Some(
-                                        self.authorize_xudp_destination(
+                                    let (capability, resolved) = self
+                                        .authorize_xudp_destination(
                                             user_id,
                                             inbound_tag,
                                             dest,
                                         )
-                                        .await?,
-                                    )
+                                        .await?;
+                                    require_direct_xudp_landward(capability).map_err(|error| {
+                                        VisionSessionError::Xudp(XudpSessionError::Outbound(error))
+                                    })?;
+                                    Some(resolved)
                                 } else {
                                     None
                                 };
@@ -4612,7 +4628,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn xudp_keep_rewrite_direct_then_block_fails_closed() {
         use crate::protocol::vless::{Address, Destination};
-        use crate::server::xudp::XudpOutboundUnsupported;
+        use crate::server::xudp::{XudpEgressCapability, XudpOutboundUnsupported};
 
         let governor = ResourceGovernorPolicy::default();
         // Block 10.0.0.0/8; default remains Direct.
@@ -4620,10 +4636,11 @@ mod tests {
         let green = Destination::new(Address::Ipv4(Ipv4Addr::new(127, 0, 0, 1)), 9);
         let red = Destination::new(Address::Ipv4(Ipv4Addr::new(10, 1, 2, 3)), 9);
 
-        let authorized = handler
+        let (capability, authorized) = handler
             .authorize_xudp_destination(USER, "public-reality", &green)
             .await
             .expect("Direct destination must remain GREEN");
+        assert_eq!(capability, XudpEgressCapability::Direct);
         assert_eq!(authorized.port(), 9);
 
         let err = handler

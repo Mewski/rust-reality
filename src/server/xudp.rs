@@ -1,8 +1,13 @@
-//! Server-side XUDP association over Direct UDP egress.
+//! Server-side XUDP association and egress authorization.
 //!
 //! Framing and Vision UDP/443 policy live in [`crate::protocol::vless`] (`encode_xudp_packet` / `decode_xudp_packet`).
-//! This module owns UDP sockets, GlobalID affinity, resource limits, and
-//! fail-closed handling for unsupported outbounds (NXR / Handoff).
+//! This module owns Direct UDP sockets, GlobalID affinity, resource limits, and
+//! capability-aware egress authorization ([`authorize_xudp_egress`]).
+//!
+//! ADR 0060 / Issue #314: NXR and Handoff are **authorized** route classes (not
+//! silently remapped to Direct). Landward NXR/Handoff UDP I/O is wired in later
+//! PRs; until then the Vision session fails closed after authorization rather
+//! than opening Direct sockets for those classes.
 
 use std::{
     collections::HashMap,
@@ -46,14 +51,15 @@ impl fmt::Display for XudpOutboundUnsupported {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Nxr => formatter.write_str(
-                "XUDP over NXR is not supported; configure a Direct route for UDP destinations",
+                "XUDP NXR egress is not available on this path (landward NXR UDP not wired, or Direct landward required)",
             ),
             Self::Handoff => formatter.write_str(
-                "XUDP over Handoff is not supported; configure a Direct route for UDP destinations",
+                "XUDP Handoff egress is not available on this path (landward Handoff UDP not wired, or Direct landward required)",
             ),
             Self::Block => formatter.write_str("XUDP destination is blocked by routing"),
-            Self::Other => formatter
-                .write_str("XUDP requires a Direct outbound; this route is not UDP-capable"),
+            Self::Other => formatter.write_str(
+                "XUDP outbound is not UDP-capable (SOCKS5 or unknown); Block/unknown stay fail-closed",
+            ),
         }
     }
 }
@@ -72,15 +78,67 @@ pub enum XudpRouteClass {
     Unsupported,
 }
 
-/// Returns `Ok(())` only when the route class can carry XUDP (Direct).
-pub fn require_direct_xudp_route(class: XudpRouteClass) -> Result<(), XudpOutboundUnsupported> {
+/// Authorized XUDP egress owner for a routed destination (ADR 0060).
+///
+/// Distinct variants are intentional: NXR/Handoff MUST NOT be collapsed into
+/// [`Self::Direct`]. Landward forwarding for NXR/Handoff is implemented in
+/// follow-up PRs; callers that only speak Direct UDP sockets must call
+/// [`require_direct_xudp_landward`] after authorization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum XudpEgressCapability {
+    /// Local Direct UDP sockets on the entry / LINE process.
+    Direct,
+    /// LINE→LANDING NXR UDP (framed TCP carrier per ADR 0060 Option A).
+    Nxr,
+    /// LINE→LANDING Handoff UDP (TLS ownership on LANDING; policy snapshot).
+    Handoff,
+}
+
+/// Authorize an XUDP New/Keep destination's routed outbound class.
+///
+/// Returns a distinct capability for Direct, NXR, and Handoff. Block and
+/// unknown/non-UDP outbounds fail closed. Never remaps NXR/Handoff to Direct.
+///
+/// # Errors
+///
+/// [`XudpOutboundUnsupported::Block`] or [`XudpOutboundUnsupported::Other`].
+pub fn authorize_xudp_egress(
+    class: XudpRouteClass,
+) -> Result<XudpEgressCapability, XudpOutboundUnsupported> {
     match class {
-        XudpRouteClass::Direct => Ok(()),
-        XudpRouteClass::Nxr => Err(XudpOutboundUnsupported::Nxr),
-        XudpRouteClass::Handoff => Err(XudpOutboundUnsupported::Handoff),
+        XudpRouteClass::Direct => Ok(XudpEgressCapability::Direct),
+        XudpRouteClass::Nxr => Ok(XudpEgressCapability::Nxr),
+        XudpRouteClass::Handoff => Ok(XudpEgressCapability::Handoff),
         XudpRouteClass::Block => Err(XudpOutboundUnsupported::Block),
         XudpRouteClass::Unsupported => Err(XudpOutboundUnsupported::Other),
     }
+}
+
+/// Returns `Ok(())` only when local Direct UDP landward sockets may be opened.
+///
+/// Use after [`authorize_xudp_egress`] when the caller is the Direct association
+/// path. NXR/Handoff capabilities fail closed here so they cannot silently open
+/// Direct sockets.
+///
+/// # Errors
+///
+/// Any non-Direct capability or rejected class maps to [`XudpOutboundUnsupported`].
+pub fn require_direct_xudp_landward(
+    capability: XudpEgressCapability,
+) -> Result<(), XudpOutboundUnsupported> {
+    match capability {
+        XudpEgressCapability::Direct => Ok(()),
+        XudpEgressCapability::Nxr => Err(XudpOutboundUnsupported::Nxr),
+        XudpEgressCapability::Handoff => Err(XudpOutboundUnsupported::Handoff),
+    }
+}
+
+/// Deprecated name for [`require_direct_xudp_landward`] after class→capability.
+///
+/// Prefer [`authorize_xudp_egress`] + [`require_direct_xudp_landward`]. This
+/// helper still means "Direct landward only" and rejects NXR/Handoff/Block.
+pub fn require_direct_xudp_route(class: XudpRouteClass) -> Result<(), XudpOutboundUnsupported> {
+    require_direct_xudp_landward(authorize_xudp_egress(class)?)
 }
 
 /// Errors from server XUDP association handling.
@@ -327,7 +385,7 @@ impl XudpDirectAssociation {
     ///
     /// When `packet.destination` is present (New, or Keep rewrite), the caller
     /// MUST supply `authorized_destination`: the same logical destination after
-    /// canonical routing, DNS resolution, and Direct-only outbound checks.
+    /// canonical routing, DNS resolution, and capability-aware egress checks.
     /// Associations never inherit a prior Direct decision across a rewrite.
     pub async fn handle_uplink_packet(
         &mut self,
@@ -424,12 +482,30 @@ mod tests {
     use std::net::Ipv4Addr;
 
     #[test]
-    fn direct_outbound_is_allowed() {
+    fn authorize_direct_ok_and_landward_direct() {
+        let cap = authorize_xudp_egress(XudpRouteClass::Direct).unwrap();
+        assert_eq!(cap, XudpEgressCapability::Direct);
+        require_direct_xudp_landward(cap).unwrap();
         require_direct_xudp_route(XudpRouteClass::Direct).unwrap();
     }
 
     #[test]
-    fn nxr_and_handoff_fail_closed() {
+    fn authorize_nxr_and_handoff_are_distinct_not_direct() {
+        let nxr = authorize_xudp_egress(XudpRouteClass::Nxr).unwrap();
+        let handoff = authorize_xudp_egress(XudpRouteClass::Handoff).unwrap();
+        assert_eq!(nxr, XudpEgressCapability::Nxr);
+        assert_eq!(handoff, XudpEgressCapability::Handoff);
+        assert_ne!(nxr, XudpEgressCapability::Direct);
+        assert_ne!(handoff, XudpEgressCapability::Direct);
+        // Direct landward path must not accept them (no silent Direct sockets).
+        assert_eq!(
+            require_direct_xudp_landward(nxr),
+            Err(XudpOutboundUnsupported::Nxr)
+        );
+        assert_eq!(
+            require_direct_xudp_landward(handoff),
+            Err(XudpOutboundUnsupported::Handoff)
+        );
         assert_eq!(
             require_direct_xudp_route(XudpRouteClass::Nxr),
             Err(XudpOutboundUnsupported::Nxr)
@@ -437,6 +513,18 @@ mod tests {
         assert_eq!(
             require_direct_xudp_route(XudpRouteClass::Handoff),
             Err(XudpOutboundUnsupported::Handoff)
+        );
+    }
+
+    #[test]
+    fn authorize_block_and_unsupported_fail_closed() {
+        assert_eq!(
+            authorize_xudp_egress(XudpRouteClass::Block),
+            Err(XudpOutboundUnsupported::Block)
+        );
+        assert_eq!(
+            authorize_xudp_egress(XudpRouteClass::Unsupported),
+            Err(XudpOutboundUnsupported::Other)
         );
         assert_eq!(
             require_direct_xudp_route(XudpRouteClass::Block),
@@ -556,22 +644,37 @@ mod tests {
 
     #[test]
     fn keep_rewrite_route_class_red_green() {
-        // GREEN: Direct remains eligible.
-        require_direct_xudp_route(XudpRouteClass::Direct).unwrap();
-        // RED: a later Keep rewrite that routes to Block/Handoff/NXR must not
-        // inherit the prior Direct decision — same fail-closed classifier.
+        // GREEN: Direct→Direct rewrite stays authorized as Direct.
         assert_eq!(
-            require_direct_xudp_route(XudpRouteClass::Block),
+            authorize_xudp_egress(XudpRouteClass::Direct).unwrap(),
+            XudpEgressCapability::Direct
+        );
+        // RED: Block / Unsupported fail closed (no inheritance from a prior Direct).
+        assert_eq!(
+            authorize_xudp_egress(XudpRouteClass::Block),
             Err(XudpOutboundUnsupported::Block)
         );
         assert_eq!(
-            require_direct_xudp_route(XudpRouteClass::Handoff),
-            Err(XudpOutboundUnsupported::Handoff)
+            authorize_xudp_egress(XudpRouteClass::Unsupported),
+            Err(XudpOutboundUnsupported::Other)
         );
-        assert_eq!(
-            require_direct_xudp_route(XudpRouteClass::Nxr),
-            Err(XudpOutboundUnsupported::Nxr)
-        );
+        // NXR/Handoff authorize as themselves — never as Direct — and Direct
+        // landward still rejects them (no silent Direct fallback).
+        for (class, cap, landward_err) in [
+            (
+                XudpRouteClass::Nxr,
+                XudpEgressCapability::Nxr,
+                XudpOutboundUnsupported::Nxr,
+            ),
+            (
+                XudpRouteClass::Handoff,
+                XudpEgressCapability::Handoff,
+                XudpOutboundUnsupported::Handoff,
+            ),
+        ] {
+            assert_eq!(authorize_xudp_egress(class).unwrap(), cap);
+            assert_eq!(require_direct_xudp_landward(cap), Err(landward_err));
+        }
     }
 
     #[tokio::test]
