@@ -606,7 +606,7 @@ impl VisionHandler {
                     ))?;
                     let now = std::time::Instant::now();
                     let assoc =
-                        XudpDirectAssociation::open(&bind_dest, packet.global_id, globals, now)
+                        XudpDirectAssociation::open(&bind_dest, packet.global_id, *user_id.as_bytes(), globals, now)
                             .await
                             .map_err(VisionSessionError::Xudp)?;
                     association = Some(assoc);

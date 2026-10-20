@@ -45,3 +45,9 @@ criteria.
 - Mandatory rust↔rust UDP/443 + genuine HTTP/3 over XUDP is enforced by
   Exact-head Native via `tests/quic_h3_udp443_e2e.rs` (capability-gated;
   fail-closed without bind privilege).
+
+- Mandatory adversarial XUDP lifecycle and routing qualification is enforced by
+  Exact-head Native via `tests/xudp_adversarial_lifecycle.rs` (rewrite security,
+  GlobalID ownership/capacity, incomplete frames, payload bounds, cancel/recovery,
+  malformed/pressure, fail-detection demos).
+
