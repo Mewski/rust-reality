@@ -897,7 +897,10 @@ fn fresh_nxr_request(
 
 /// Builds one UDP-mode NXR open (ADR 0060). Does not dial; used by LINE when
 /// Vision routes XUDP to an NXR outbound (wired in a follow-up PR).
-#[allow(dead_code, reason = "Vision XUDP→NXR open helper; used by connect_nxr_udp / next PR")]
+#[allow(
+    dead_code,
+    reason = "Vision XUDP→NXR open helper; used by connect_nxr_udp / next PR"
+)]
 fn fresh_nxr_udp_request(
     settings: &CompiledNxr,
     destination: &Destination,
@@ -925,7 +928,10 @@ fn fresh_nxr_udp_request(
 /// Dials an NXR landing and writes one authenticated UDP-mode open.
 ///
 /// Returns the connected stream ready for length-prefixed NXR UDP frames.
-#[allow(dead_code, reason = "Vision XUDP→NXR session wiring lands in the next PR")]
+#[allow(
+    dead_code,
+    reason = "Vision XUDP→NXR session wiring lands in the next PR"
+)]
 async fn connect_nxr_udp(
     settings: &CompiledNxr,
     destination: &Destination,
