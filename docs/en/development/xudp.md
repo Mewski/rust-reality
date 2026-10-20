@@ -15,21 +15,23 @@ See Issue [#254](https://github.com/jacek4yang/rust-reality/issues/254) for pin 
 
 | Outbound | UDP via XUDP |
 | --- | --- |
-| Direct | Supported (this implementation) |
-| NXR | **Not supported** — session fails closed with an explicit error |
-| Handoff | **Not supported** — session fails closed with an explicit error |
-| Block | Rejected by routing as usual |
+| Direct | Supported (local Direct UDP sockets) |
+| NXR | **Authorized** as a distinct egress capability ([ADR 0060](../../adr/0060-xudp-over-nxr-and-handoff.md)); landward NXR UDP forwarding is wired in follow-up PRs. Until then the Vision session fails closed **after** authorization — it must **not** open Direct sockets for an NXR route. |
+| Handoff | **Authorized** as a distinct egress capability ([ADR 0060](../../adr/0060-xudp-over-nxr-and-handoff.md)); landward Handoff UDP forwarding is wired in follow-up PRs. Same no-silent-Direct rule. |
+| Block | Rejected by routing / authorization as usual |
+| Other (e.g. SOCKS5) | Fail closed (`Unsupported`) |
+
+See Issue [#314](https://github.com/jacek4yang/rust-reality/issues/314).
 
 
 ## Keep destination rewrites
 
 A Keep frame may embed a new UDP destination (multi-address association). Each
 rewrite is re-evaluated through the same canonical routing table, DNS strategy,
-and Direct-only outbound authorization as the opening New frame. A destination
-that previously routed to Direct does **not** authorize a later Block, Handoff,
-or NXR target — the session fails closed.
-
-NXR and Handoff today are TCP continuation transports. Extending them for UDP is out of scope for the first unified-client UDP release; unsupported routes must not silently fall back to Direct.
+and capability-aware egress authorization (`authorize_xudp_egress`) as the
+opening New frame. A destination that previously routed to Direct does **not**
+authorize a later Block or unknown outbound — the session fails closed. NXR and
+Handoff authorize as themselves and must never be silently remapped to Direct.
 
 ## Carrier
 
@@ -58,7 +60,7 @@ tests from earlier PRs:
 | SOCKS5 UDP ASSOCIATE E2E | Loopback client → REALITY entry → Direct UDP echo with byte-exact payload |
 | UDP/443 policy | Without `allowUdp443`, UDP/443 fails closed; with it, XUDP may carry 443 |
 | Framing fuzz | `fuzz_decode_xudp_packet` remains in the wire-parser fuzz shard |
-| Route fail-closed | NXR / Handoff / Block remain explicit errors (no silent Direct fallback) |
+| Route fail-closed | Block/unknown reject at authorize; NXR/Handoff are distinct capabilities and must not silently become Direct |
 
 This is **not** native QUIC transport. QUIC/443 traffic, when permitted, is still
 UDP datagrams inside Vision/XUDP over the existing REALITY LINE.
@@ -122,7 +124,7 @@ gate (`xudp-adversarial` evidence). It proves:
 | Payload boundaries | Exact `XUDP_MAX_PAYLOAD_LEN` (7526) encodes; oversize fails closed and is failure-atomic |
 | Cancel / recovery | `close` → expire → purge frees the GlobalID; same owner may reopen |
 | Malformed + pressure | Codec rejects malformed prefixes; association limit under pressure then recovers |
-| Fail-detection demos | UnauthorizedRewrite and Direct-only route-class gates must remain present |
+| Fail-detection demos | UnauthorizedRewrite and egress route-class gates must remain present |
 
 Rust Client → stock Xray Server remains **not required** (ADR 0059).
 

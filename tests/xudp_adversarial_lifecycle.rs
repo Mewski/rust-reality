@@ -1,8 +1,9 @@
 //! Adversarial XUDP lifecycle and routing qualification (FINAL MISSION Q3).
 //!
 //! Process-level gates (library APIs used by Vision XUDP):
-//! - Destination rewrite security: Direct→Block/NXR/Handoff rejects; zero
-//!   datagrams reach a forbidden destination when authorization is withheld.
+//! - Destination rewrite security: Direct→Block rejects; NXR/Handoff authorize
+//!   as distinct capabilities (never Direct); zero datagrams reach a forbidden
+//!   destination when authorization is withheld.
 //! - GlobalID ownership / process-wide capacity / no cross-user claim.
 //! - Incomplete-frame progress (Truncated ⇒ wait for more bytes, no busy-spin).
 //! - Payload boundaries at stock `XUDP_MAX_PAYLOAD_LEN`.
@@ -22,9 +23,9 @@ use rust_reality::protocol::vless::{
     decode_xudp_packet, encode_xudp_packet,
 };
 use rust_reality::server::xudp::{
-    XUDP_ASSOCIATION_IDLE, XUDP_MAX_ASSOCIATIONS, XudpDirectAssociation, XudpGlobalMap,
-    XudpOutboundUnsupported, XudpRouteClass, XudpSessionError, drain_xudp_frames,
-    require_direct_xudp_route,
+    XUDP_ASSOCIATION_IDLE, XUDP_MAX_ASSOCIATIONS, XudpDirectAssociation, XudpEgressCapability,
+    XudpGlobalMap, XudpOutboundUnsupported, XudpRouteClass, XudpSessionError, drain_xudp_frames,
+    authorize_xudp_egress, require_direct_xudp_landward, require_direct_xudp_route,
 };
 use tokio::net::UdpSocket;
 
@@ -51,13 +52,14 @@ fn packet_keep_rewrite(
     decode_xudp_packet(&wire).expect("decode Keep").0
 }
 
-/// Simulate Vision authorize: only Direct may proceed; Block/NXR/Handoff reject.
+/// Simulate Vision authorize + Direct landward gate (PR1 / ADR 0060).
 fn authorize_or_reject(
     class: XudpRouteClass,
     dest: &Destination,
-) -> Result<Destination, XudpSessionError> {
-    require_direct_xudp_route(class).map_err(XudpSessionError::Outbound)?;
-    Ok(dest.clone())
+) -> Result<(XudpEgressCapability, Destination), XudpSessionError> {
+    let capability = authorize_xudp_egress(class).map_err(XudpSessionError::Outbound)?;
+    require_direct_xudp_landward(capability).map_err(XudpSessionError::Outbound)?;
+    Ok((capability, dest.clone()))
 }
 
 #[tokio::test]
@@ -82,7 +84,8 @@ async fn rewrite_direct_to_block_rejects_and_sends_zero_datagrams() {
 
     // Opening New to Direct is fine.
     let open = packet_new(&allowed_dest, b"open-ok", Some([1; 8]));
-    let auth = authorize_or_reject(XudpRouteClass::Direct, &allowed_dest).unwrap();
+    let (cap, auth) = authorize_or_reject(XudpRouteClass::Direct, &allowed_dest).unwrap();
+    assert_eq!(cap, XudpEgressCapability::Direct);
     assoc
         .handle_uplink_packet(&open, Some(&auth), Instant::now())
         .await
@@ -128,16 +131,25 @@ async fn rewrite_direct_to_block_rejects_and_sends_zero_datagrams() {
 }
 
 #[tokio::test]
-async fn rewrite_direct_to_nxr_and_handoff_reject() {
-    for (class, kind) in [
-        (XudpRouteClass::Nxr, XudpOutboundUnsupported::Nxr),
-        (XudpRouteClass::Handoff, XudpOutboundUnsupported::Handoff),
+async fn rewrite_nxr_and_handoff_authorize_distinct_not_direct() {
+    for (class, expected) in [
+        (XudpRouteClass::Nxr, XudpEgressCapability::Nxr),
+        (XudpRouteClass::Handoff, XudpEgressCapability::Handoff),
     ] {
-        let err = authorize_or_reject(class, &dest_ip([10, 0, 0, 9], 9))
-            .expect_err("non-Direct rewrite must reject");
-        assert!(matches!(err, XudpSessionError::Outbound(k) if k == kind));
+        let capability = authorize_xudp_egress(class).expect("NXR/Handoff must authorize");
+        assert_eq!(capability, expected);
+        assert_ne!(capability, XudpEgressCapability::Direct);
+        // Direct landward path still fails closed (no silent Direct sockets).
+        let err = require_direct_xudp_landward(capability).expect_err("landward Direct denied");
+        assert!(matches!(
+            err,
+            XudpOutboundUnsupported::Nxr | XudpOutboundUnsupported::Handoff
+        ));
+        let session_err = authorize_or_reject(class, &dest_ip([10, 0, 0, 9], 9))
+            .expect_err("PR1 Direct landward session path must reject NXR/Handoff");
+        assert!(matches!(session_err, XudpSessionError::Outbound(_)));
     }
-    eprintln!("rewrite_direct_to_nxr_and_handoff_reject PASS");
+    eprintln!("rewrite_nxr_and_handoff_authorize_distinct_not_direct PASS");
 }
 
 #[test]
@@ -304,7 +316,7 @@ fn malformed_input_and_resource_pressure_fail_closed() {
 }
 
 /// Fail-detection demos: these assertions are the gates. Removing
-/// UnauthorizedRewrite / Direct-only classification would turn them RED.
+/// UnauthorizedRewrite / egress classification would turn them RED.
 #[tokio::test]
 async fn fail_detection_demo_unauthorized_rewrite_gate() {
     let echo = UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
@@ -333,10 +345,31 @@ async fn fail_detection_demo_unauthorized_rewrite_gate() {
 
 #[test]
 fn fail_detection_demo_route_class_gate() {
+    assert_eq!(
+        authorize_xudp_egress(XudpRouteClass::Direct).unwrap(),
+        XudpEgressCapability::Direct,
+        "GATE: Direct must authorize as Direct"
+    );
     assert!(
         require_direct_xudp_route(XudpRouteClass::Direct).is_ok(),
-        "GATE: Direct must remain eligible"
+        "GATE: Direct landward must remain eligible"
     );
+    assert_eq!(
+        authorize_xudp_egress(XudpRouteClass::Nxr).unwrap(),
+        XudpEgressCapability::Nxr,
+        "GATE: NXR must authorize as Nxr (not Direct)"
+    );
+    assert_eq!(
+        authorize_xudp_egress(XudpRouteClass::Handoff).unwrap(),
+        XudpEgressCapability::Handoff,
+        "GATE: Handoff must authorize as Handoff (not Direct)"
+    );
+    for class in [XudpRouteClass::Block, XudpRouteClass::Unsupported] {
+        assert!(
+            authorize_xudp_egress(class).is_err(),
+            "GATE: {class:?} must fail closed at authorization"
+        );
+    }
     for class in [
         XudpRouteClass::Block,
         XudpRouteClass::Nxr,
@@ -345,7 +378,7 @@ fn fail_detection_demo_route_class_gate() {
     ] {
         assert!(
             require_direct_xudp_route(class).is_err(),
-            "GATE: {class:?} must fail closed (no silent Direct fallback)"
+            "GATE: {class:?} must not open Direct landward (no silent Direct fallback)"
         );
     }
     eprintln!("fail_detection_demo_route_class_gate PASS");
