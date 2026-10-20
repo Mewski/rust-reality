@@ -101,3 +101,4 @@ of the law is what it is.
 | [0057](0057-tsan-keeps-current-thread-vision-proofs.md) | ThreadSanitizer stays; Vision accumulation uses current_thread | Accepted |
 | [0058](0058-restart-ack-census-uses-clock-guard.md) | Restart ACK/census ordering uses clock_guard across guests | Accepted |
 | [0059](0059-asymmetric-stock-xray-interop.md) | Asymmetric stock Xray interop (Xray client → RR required; RR client → Xray not required) | Accepted |
+| [0060](0060-xudp-over-nxr-and-handoff.md) | XUDP over NXR and Handoff (TCP framed NXR carrier; Handoff policy snapshot) | Accepted |
