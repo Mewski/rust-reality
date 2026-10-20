@@ -42,3 +42,6 @@ criteria.
   and is never part of the mandatory filter.
 - Optimizations that preserve Xray-client ingress remain in scope; work whose
   only purpose is rust-reality→Xray server fidelity is out of scope.
+- Mandatory rust↔rust UDP/443 + genuine HTTP/3 over XUDP is enforced by
+  Exact-head Native via `tests/quic_h3_udp443_e2e.rs` (capability-gated;
+  fail-closed without bind privilege).

@@ -112,7 +112,17 @@ x25519-dalek = { version = "3.0.0", default-features = false, features = ["preco
 allocation-counter = "0.8.1"
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 ring = { version = "0.17.14", default-features = false }
-tokio = { version = "1.52.3", default-features = false, features = ["test-util"] }
+tokio = { version = "1.52.3", default-features = false, features = ["test-util", "rt-multi-thread", "macros", "net", "time", "io-util", "sync"] }
+# Test-only genuine HTTP/3 over SOCKS5 UDP ASSOCIATE (PR Q2). Never linked into
+# the production binary; `cargo tree -e normal` must not show these.
+quinn = { version = "0.11.12", default-features = false, features = ["rustls-ring", "runtime-tokio", "log"] }
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
+rcgen = "0.13.2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+bytes = "1"
+http = "1"
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 
 [[bench]]
 name = "vless_decode"
