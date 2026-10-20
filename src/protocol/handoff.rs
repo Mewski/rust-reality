@@ -69,8 +69,18 @@ pub const MAX_INBOUND_TAG_LEN: usize = 64;
 /// Maximum sealed policy-snapshot payload (ADR 0060 Option B foundation).
 pub const MAX_POLICY_SNAPSHOT_LEN: usize = 1024;
 
+/// Maximum first-match sealed route rules inside one policy snapshot.
+pub const MAX_SEALED_HANDOFF_RULES: usize = 32;
+
 /// Policy snapshot format version inside the continuation blob.
-pub const HANDOFF_POLICY_SNAPSHOT_VERSION: u8 = 1;
+///
+/// - Version 1: initial destination + `allow_destination_rewrites` flag only
+///   (PR4). Decoded as rewrite-disabled / empty rule list.
+/// - Version 2: ordered sealable route rules + default-outbound allow bit (PR5).
+pub const HANDOFF_POLICY_SNAPSHOT_VERSION: u8 = 2;
+
+/// Legacy PR4 policy snapshot version (still accepted on decode).
+pub const HANDOFF_POLICY_SNAPSHOT_VERSION_V1: u8 = 1;
 
 /// Vision session kind transferred with the TLS continuation (ADR 0060).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -98,14 +108,150 @@ impl SessionKind {
     }
 }
 
+/// Sealable domain matcher (no geosite / regex / external assets).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SealedDomainMatcher {
+    /// `full:example.com`
+    Full(String),
+    /// `domain:example.com` / bare suffix
+    Suffix(String),
+    /// `keyword:foo`
+    Keyword(String),
+}
+
+impl SealedDomainMatcher {
+    fn matches(&self, domain: &str) -> bool {
+        let domain = domain.to_ascii_lowercase();
+        match self {
+            Self::Full(value) => domain == value.as_str(),
+            Self::Suffix(value) => {
+                domain == value.as_str()
+                    || (domain.len() > value.len()
+                        && domain.ends_with(value.as_str())
+                        && domain.as_bytes()[domain.len() - value.len() - 1] == b'.')
+            }
+            Self::Keyword(value) => {
+                value.is_empty()
+                    || domain
+                        .as_bytes()
+                        .windows(value.len())
+                        .any(|window| window == value.as_bytes())
+            }
+        }
+    }
+}
+
+/// Sealable IPv4/IPv6 network (no geoip / external assets).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SealedIpNetwork {
+    V4 { network: u32, prefix: u8 },
+    V6 { network: u128, prefix: u8 },
+}
+
+impl SealedIpNetwork {
+    #[must_use]
+    pub fn contains(self, address: std::net::IpAddr) -> bool {
+        match (self, address) {
+            (Self::V4 { network, prefix }, std::net::IpAddr::V4(addr)) => {
+                let mask = if prefix == 0 {
+                    0
+                } else {
+                    u32::MAX << (32 - prefix)
+                };
+                (u32::from(addr) & mask) == (network & mask)
+            }
+            (Self::V6 { network, prefix }, std::net::IpAddr::V6(addr)) => {
+                let mask = if prefix == 0 {
+                    0
+                } else {
+                    u128::MAX << (128 - prefix)
+                };
+                (u128::from(addr) & mask) == (network & mask)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Inclusive destination port range sealed into a Handoff policy rule.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SealedPortRange {
+    pub start: u16,
+    pub end: u16,
+}
+
+impl SealedPortRange {
+    #[must_use]
+    pub const fn contains(self, port: u16) -> bool {
+        self.start <= port && port <= self.end
+    }
+}
+
+/// One first-match sealed rule mirroring LINE routing for this Handoff outbound.
+///
+/// Empty domain / IP / port groups mean "match any" for that group (AND across
+/// groups), matching [`crate::server::routing`] semantics for sealable rules.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SealedHandoffRouteRule {
+    /// `true` when the matched outbound is the Handoff egress used for transfer.
+    pub allow: bool,
+    pub domains: Vec<SealedDomainMatcher>,
+    pub ips: Vec<SealedIpNetwork>,
+    pub ports: Vec<SealedPortRange>,
+}
+
+impl SealedHandoffRouteRule {
+    fn matches(&self, destination: &Destination) -> bool {
+        let port_ok = self.ports.is_empty()
+            || self
+                .ports
+                .iter()
+                .any(|range| range.contains(destination.port()));
+        if !port_ok {
+            return false;
+        }
+        let domain_ok = if self.domains.is_empty() {
+            true
+        } else {
+            match destination.address() {
+                Address::Domain(domain) => self.domains.iter().any(|m| m.matches(domain)),
+                Address::Ipv4(_) | Address::Ipv6(_) => false,
+            }
+        };
+        if !domain_ok {
+            return false;
+        }
+        if self.ips.is_empty() {
+            true
+        } else {
+            match destination.address() {
+                Address::Ipv4(addr) => self
+                    .ips
+                    .iter()
+                    .any(|net| net.contains(std::net::IpAddr::V4(*addr))),
+                Address::Ipv6(addr) => self
+                    .ips
+                    .iter()
+                    .any(|net| net.contains(std::net::IpAddr::V6(*addr))),
+                Address::Domain(_) => false,
+            }
+        }
+    }
+}
+
 /// Session-bound UDP authorization sealed at Handoff transfer (ADR 0060 Option B).
 ///
-/// PR4 foundation: LANDING may serve the initial destination; Keep rewrites to a
-/// new destination fail closed until PR5 widens `allow_destination_rewrites`.
+/// PR5: LANDING evaluates Keep destination rewrites against ordered sealable
+/// route rules compiled on LINE at transfer time. Non-sealable matchers
+/// (geosite/geoip/regexp/ext) force rewrite-disabled fail-closed snapshots.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HandoffPolicySnapshot {
     initial_destination: Destination,
     allow_destination_rewrites: bool,
+    /// First-match sealed rules (global then user), then [`Self::default_allow`].
+    rules: Vec<SealedHandoffRouteRule>,
+    /// Whether the user's default outbound is this Handoff egress.
+    default_allow: bool,
 }
 
 impl HandoffPolicySnapshot {
@@ -114,14 +260,35 @@ impl HandoffPolicySnapshot {
         Self {
             initial_destination: destination,
             allow_destination_rewrites: false,
+            rules: Vec::new(),
+            default_allow: false,
         }
     }
 
+    /// Initial-destination-only XUDP policy (rewrites fail closed).
     #[must_use]
     pub fn xudp_initial(destination: Destination) -> Self {
         Self {
             initial_destination: destination,
             allow_destination_rewrites: false,
+            rules: Vec::new(),
+            default_allow: false,
+        }
+    }
+
+    /// Multi-destination XUDP policy with ordered sealed rules (PR5).
+    #[must_use]
+    pub fn xudp_with_sealed_rules(
+        destination: Destination,
+        rules: Vec<SealedHandoffRouteRule>,
+        default_allow: bool,
+    ) -> Self {
+        let allow_destination_rewrites = default_allow || rules.iter().any(|rule| rule.allow);
+        Self {
+            initial_destination: destination,
+            allow_destination_rewrites,
+            rules,
+            default_allow,
         }
     }
 
@@ -135,21 +302,43 @@ impl HandoffPolicySnapshot {
         self.allow_destination_rewrites
     }
 
+    #[must_use]
+    pub fn sealed_rules(&self) -> &[SealedHandoffRouteRule] {
+        &self.rules
+    }
+
+    #[must_use]
+    pub const fn default_allow(&self) -> bool {
+        self.default_allow
+    }
+
     /// Authorize one XUDP New/Keep destination against this snapshot.
     ///
     /// # Errors
     ///
     /// Deny when the destination differs from the sealed initial target and
-    /// rewrites are not enabled.
+    /// either rewrites are disabled or no sealed rule / default allows it.
     pub fn authorize_udp_destination(&self, destination: &Destination) -> Result<(), HandoffError> {
         if destination == &self.initial_destination {
             return Ok(());
         }
-        if self.allow_destination_rewrites {
-            // PR5 will evaluate a richer compiled snapshot here.
-            return Ok(());
+        if !self.allow_destination_rewrites {
+            return Err(HandoffError::State);
         }
-        Err(HandoffError::State)
+        for rule in &self.rules {
+            if rule.matches(destination) {
+                return if rule.allow {
+                    Ok(())
+                } else {
+                    Err(HandoffError::State)
+                };
+            }
+        }
+        if self.default_allow {
+            Ok(())
+        } else {
+            Err(HandoffError::State)
+        }
     }
 }
 
@@ -1160,11 +1349,11 @@ fn encode_blob(state: &ContinuationState, output: &mut Vec<u8>) -> Result<(), Ha
 }
 
 fn encoded_policy_len(policy: &HandoffPolicySnapshot) -> Result<usize, HandoffError> {
-    let address_length = bounded_address_length(policy.initial_destination())?;
-    1_usize // snapshot version
-        .checked_add(1) // allow_rewrites
-        .and_then(|length| length.checked_add(1 + 2 + address_length + 2))
-        .filter(|length| *length <= MAX_POLICY_SNAPSHOT_LEN)
+    let mut body = Vec::new();
+    encode_policy_snapshot_body(policy, &mut body)?;
+    body.len()
+        .checked_add(4) // outer length prefix
+        .filter(|_length| body.len() <= MAX_POLICY_SNAPSHOT_LEN)
         .ok_or(HandoffError::Length)
 }
 
@@ -1183,15 +1372,89 @@ fn encode_policy_snapshot(
     output: &mut Vec<u8>,
 ) -> Result<(), HandoffError> {
     let mut body = Vec::new();
-    body.push(HANDOFF_POLICY_SNAPSHOT_VERSION);
-    body.push(u8::from(policy.allow_destination_rewrites()));
-    encode_address(policy.initial_destination(), &mut body);
-    body.extend_from_slice(&policy.initial_destination().port().to_be_bytes());
+    encode_policy_snapshot_body(policy, &mut body)?;
     if body.len() > MAX_POLICY_SNAPSHOT_LEN {
         return Err(HandoffError::Length);
     }
     encode_bounded_bytes(&body, output);
     Ok(())
+}
+
+fn encode_policy_snapshot_body(
+    policy: &HandoffPolicySnapshot,
+    body: &mut Vec<u8>,
+) -> Result<(), HandoffError> {
+    body.push(HANDOFF_POLICY_SNAPSHOT_VERSION);
+    body.push(u8::from(policy.allow_destination_rewrites()));
+    body.push(u8::from(policy.default_allow()));
+    encode_address(policy.initial_destination(), body);
+    body.extend_from_slice(&policy.initial_destination().port().to_be_bytes());
+    let rule_count = u8::try_from(policy.sealed_rules().len()).map_err(|_| HandoffError::Length)?;
+    if usize::from(rule_count) > MAX_SEALED_HANDOFF_RULES {
+        return Err(HandoffError::Length);
+    }
+    body.push(rule_count);
+    for rule in policy.sealed_rules() {
+        encode_sealed_rule(rule, body)?;
+    }
+    Ok(())
+}
+
+fn encode_sealed_rule(
+    rule: &SealedHandoffRouteRule,
+    body: &mut Vec<u8>,
+) -> Result<(), HandoffError> {
+    body.push(u8::from(rule.allow));
+    let domain_count = u8::try_from(rule.domains.len()).map_err(|_| HandoffError::Length)?;
+    body.push(domain_count);
+    for domain in &rule.domains {
+        encode_sealed_domain(domain, body)?;
+    }
+    let ip_count = u8::try_from(rule.ips.len()).map_err(|_| HandoffError::Length)?;
+    body.push(ip_count);
+    for ip in &rule.ips {
+        encode_sealed_ip(*ip, body);
+    }
+    let port_count = u8::try_from(rule.ports.len()).map_err(|_| HandoffError::Length)?;
+    body.push(port_count);
+    for port in &rule.ports {
+        body.extend_from_slice(&port.start.to_be_bytes());
+        body.extend_from_slice(&port.end.to_be_bytes());
+    }
+    Ok(())
+}
+
+fn encode_sealed_domain(
+    domain: &SealedDomainMatcher,
+    body: &mut Vec<u8>,
+) -> Result<(), HandoffError> {
+    let (kind, value) = match domain {
+        SealedDomainMatcher::Full(value) => (1_u8, value.as_str()),
+        SealedDomainMatcher::Suffix(value) => (2_u8, value.as_str()),
+        SealedDomainMatcher::Keyword(value) => (3_u8, value.as_str()),
+    };
+    if value.len() > 255 {
+        return Err(HandoffError::Length);
+    }
+    body.push(kind);
+    body.push(u8::try_from(value.len()).map_err(|_| HandoffError::Length)?);
+    body.extend_from_slice(value.as_bytes());
+    Ok(())
+}
+
+fn encode_sealed_ip(network: SealedIpNetwork, body: &mut Vec<u8>) {
+    match network {
+        SealedIpNetwork::V4 { network, prefix } => {
+            body.push(4);
+            body.push(prefix);
+            body.extend_from_slice(&network.to_be_bytes());
+        }
+        SealedIpNetwork::V6 { network, prefix } => {
+            body.push(6);
+            body.push(prefix);
+            body.extend_from_slice(&network.to_be_bytes());
+        }
+    }
 }
 
 fn encode_address(destination: &Destination, output: &mut Vec<u8>) {
@@ -1289,22 +1552,143 @@ fn decode_policy_snapshot(
 ) -> Result<HandoffPolicySnapshot, HandoffError> {
     let body = decode_bounded_bytes(cursor, MAX_POLICY_SNAPSHOT_LEN)?;
     let mut inner = BlobCursor::new(&body);
-    if inner.u8()? != HANDOFF_POLICY_SNAPSHOT_VERSION {
-        return Err(HandoffError::State);
+    let version = inner.u8()?;
+    match version {
+        HANDOFF_POLICY_SNAPSHOT_VERSION_V1 => {
+            let allow_destination_rewrites = match inner.u8()? {
+                0 => false,
+                1 => true,
+                _ => return Err(HandoffError::State),
+            };
+            let initial_destination = decode_destination(&mut inner)?;
+            if inner.remaining() != 0 {
+                return Err(HandoffError::State);
+            }
+            // Legacy v1 never carried compiled rules; ignore the rewrite flag and
+            // keep initial-only semantics (no silent widen of authority).
+            let _ = allow_destination_rewrites;
+            Ok(HandoffPolicySnapshot::xudp_initial(initial_destination))
+        }
+        HANDOFF_POLICY_SNAPSHOT_VERSION => {
+            let allow_destination_rewrites = match inner.u8()? {
+                0 => false,
+                1 => true,
+                _ => return Err(HandoffError::State),
+            };
+            let default_allow = match inner.u8()? {
+                0 => false,
+                1 => true,
+                _ => return Err(HandoffError::State),
+            };
+            let initial_destination = decode_destination(&mut inner)?;
+            let rule_count = usize::from(inner.u8()?);
+            if rule_count > MAX_SEALED_HANDOFF_RULES {
+                return Err(HandoffError::State);
+            }
+            let mut rules = Vec::with_capacity(rule_count);
+            for _ in 0..rule_count {
+                rules.push(decode_sealed_rule(&mut inner)?);
+            }
+            if inner.remaining() != 0 {
+                return Err(HandoffError::State);
+            }
+            let mut policy = HandoffPolicySnapshot::xudp_with_sealed_rules(
+                initial_destination,
+                rules,
+                default_allow,
+            );
+            // Wire flag must agree with derived authority (no silent widen).
+            if policy.allow_destination_rewrites() != allow_destination_rewrites {
+                // Prefer fail-closed: force the more restrictive view.
+                if !allow_destination_rewrites {
+                    policy =
+                        HandoffPolicySnapshot::xudp_initial(policy.initial_destination().clone());
+                }
+            }
+            Ok(policy)
+        }
+        _ => Err(HandoffError::State),
     }
-    let allow_destination_rewrites = match inner.u8()? {
+}
+
+fn decode_sealed_rule(cursor: &mut BlobCursor<'_>) -> Result<SealedHandoffRouteRule, HandoffError> {
+    let allow = match cursor.u8()? {
         0 => false,
         1 => true,
         _ => return Err(HandoffError::State),
     };
-    let initial_destination = decode_destination(&mut inner)?;
-    if inner.remaining() != 0 {
+    let domain_count = usize::from(cursor.u8()?);
+    let mut domains = Vec::with_capacity(domain_count);
+    for _ in 0..domain_count {
+        domains.push(decode_sealed_domain(cursor)?);
+    }
+    let ip_count = usize::from(cursor.u8()?);
+    let mut ips = Vec::with_capacity(ip_count);
+    for _ in 0..ip_count {
+        ips.push(decode_sealed_ip(cursor)?);
+    }
+    let port_count = usize::from(cursor.u8()?);
+    let mut ports = Vec::with_capacity(port_count);
+    for _ in 0..port_count {
+        let start = cursor.u16()?;
+        let end = cursor.u16()?;
+        if start == 0 || start > end {
+            return Err(HandoffError::State);
+        }
+        ports.push(SealedPortRange { start, end });
+    }
+    Ok(SealedHandoffRouteRule {
+        allow,
+        domains,
+        ips,
+        ports,
+    })
+}
+
+fn decode_sealed_domain(cursor: &mut BlobCursor<'_>) -> Result<SealedDomainMatcher, HandoffError> {
+    let kind = cursor.u8()?;
+    let len = usize::from(cursor.u8()?);
+    let bytes = cursor.take(len)?;
+    if !bytes.is_ascii() {
         return Err(HandoffError::State);
     }
-    Ok(HandoffPolicySnapshot {
-        initial_destination,
-        allow_destination_rewrites,
-    })
+    let value = String::from_utf8(bytes.to_vec()).map_err(|_| HandoffError::State)?;
+    match kind {
+        1 => Ok(SealedDomainMatcher::Full(value)),
+        2 => Ok(SealedDomainMatcher::Suffix(value)),
+        3 => Ok(SealedDomainMatcher::Keyword(value)),
+        _ => Err(HandoffError::State),
+    }
+}
+
+fn decode_sealed_ip(cursor: &mut BlobCursor<'_>) -> Result<SealedIpNetwork, HandoffError> {
+    match cursor.u8()? {
+        4 => {
+            let prefix = cursor.u8()?;
+            if prefix > 32 {
+                return Err(HandoffError::State);
+            }
+            let mut raw = [0_u8; 4];
+            raw.copy_from_slice(cursor.take(4)?);
+            Ok(SealedIpNetwork::V4 {
+                network: u32::from_be_bytes(raw),
+                prefix,
+            })
+        }
+        6 => {
+            let prefix = cursor.u8()?;
+            if prefix > 128 {
+                return Err(HandoffError::State);
+            }
+            let mut raw = [0_u8; 16];
+            raw.copy_from_slice(cursor.take(16)?);
+            Ok(SealedIpNetwork::V6 {
+                network: u128::from_be_bytes(raw),
+                prefix,
+            })
+        }
+        _ => Err(HandoffError::State),
+    }
 }
 
 fn decode_traffic_secret(
@@ -1494,9 +1878,9 @@ mod tests {
         CONTINUATION_STATE_VERSION, ContinuationState, HANDOFF_PROTOCOL_VERSION, HEADER_LEN,
         HandoffError, HandoffLandingKeys, HandoffPolicySnapshot, HandoffPsk, HandoffReplayCache,
         MAX_BLOB_LEN, MAX_MESSAGE_LEN, MAX_PENDING_CIPHERTEXT_LEN, MAX_PREFETCHED_PLAINTEXT_LEN,
-        MAX_PREVIOUS_KEYS, MonotonicInstant, NONCE_LEN, STATE_VERSION_OFFSET, SessionKind,
-        StaticX25519Key, decode_blob, encode_blob, message_len_from_header, open_transfer,
-        seal_transfer,
+        MAX_PREVIOUS_KEYS, MonotonicInstant, NONCE_LEN, STATE_VERSION_OFFSET, SealedDomainMatcher,
+        SealedHandoffRouteRule, SealedIpNetwork, SealedPortRange, SessionKind, StaticX25519Key,
+        decode_blob, encode_blob, message_len_from_header, open_transfer, seal_transfer,
     };
     use crate::protocol::reality::tls13::{CipherSuite, HashAlgorithm, TrafficSecret};
     use crate::protocol::vless::{Address, Destination};
@@ -1945,6 +2329,103 @@ mod tests {
             policy.authorize_udp_destination(&other).unwrap_err(),
             HandoffError::State
         );
+    }
+
+    #[test]
+    fn sealed_multidest_policy_allows_matching_keep_and_denies_block() {
+        let initial = Destination::new(Address::Ipv4(std::net::Ipv4Addr::new(1, 1, 1, 1)), 53);
+        let allow_cidr = SealedHandoffRouteRule {
+            allow: true,
+            domains: Vec::new(),
+            ips: vec![SealedIpNetwork::V4 {
+                network: u32::from(std::net::Ipv4Addr::new(1, 1, 1, 0)),
+                prefix: 24,
+            }],
+            ports: vec![SealedPortRange { start: 53, end: 53 }],
+        };
+        let deny_block = SealedHandoffRouteRule {
+            allow: false,
+            domains: Vec::new(),
+            ips: vec![SealedIpNetwork::V4 {
+                network: u32::from(std::net::Ipv4Addr::new(9, 9, 9, 9)),
+                prefix: 32,
+            }],
+            ports: Vec::new(),
+        };
+        // Deny rule must be ordered before catch-all default.
+        let policy = HandoffPolicySnapshot::xudp_with_sealed_rules(
+            initial.clone(),
+            vec![deny_block, allow_cidr],
+            true,
+        );
+        assert!(policy.allow_destination_rewrites());
+        policy.authorize_udp_destination(&initial).expect("initial");
+        let keep_ok = Destination::new(Address::Ipv4(std::net::Ipv4Addr::new(1, 1, 1, 2)), 53);
+        policy
+            .authorize_udp_destination(&keep_ok)
+            .expect("same /24 Keep");
+        let blocked = Destination::new(Address::Ipv4(std::net::Ipv4Addr::new(9, 9, 9, 9)), 53);
+        assert_eq!(
+            policy.authorize_udp_destination(&blocked).unwrap_err(),
+            HandoffError::State
+        );
+        let outside = Destination::new(Address::Ipv4(std::net::Ipv4Addr::new(8, 8, 8, 8)), 53);
+        policy
+            .authorize_udp_destination(&outside)
+            .expect("default_allow covers non-matching");
+    }
+
+    #[test]
+    fn sealed_multidest_round_trips_in_continuation_blob() {
+        let initial = Destination::new(Address::Ipv4(std::net::Ipv4Addr::new(10, 0, 0, 1)), 443);
+        let rule = SealedHandoffRouteRule {
+            allow: true,
+            domains: vec![SealedDomainMatcher::Suffix("example.test".into())],
+            ips: Vec::new(),
+            ports: vec![SealedPortRange {
+                start: 443,
+                end: 443,
+            }],
+        };
+        let policy =
+            HandoffPolicySnapshot::xudp_with_sealed_rules(initial.clone(), vec![rule], false);
+        let suite = CipherSuite::ChaCha20Poly1305Sha256;
+        let state = ContinuationState::new(
+            suite,
+            TrafficSecret::from_bytes(suite.hash(), &[0x31; 32]).expect("client"),
+            0,
+            TrafficSecret::from_bytes(suite.hash(), &[0x32; 32]).expect("server"),
+            0,
+            false,
+            SessionKind::Xudp,
+            [0xCD; 16],
+            "in",
+            initial.clone(),
+            Vec::new(),
+            Vec::new(),
+            policy.clone(),
+        )
+        .expect("state");
+        let (landing_secret, landing_public) = landing_key_pair(0xB1);
+        let psk = HandoffPsk::new([0x6A; 32]);
+        let message = seal(&state, &psk, &landing_public);
+        let opened = open_transfer(
+            &message,
+            &HandoffLandingKeys::single(psk, StaticX25519Key::new(&landing_secret)),
+            &test_cache(),
+            NOW,
+            WINDOW,
+        )
+        .expect("open")
+        .into_state();
+        assert_eq!(opened.policy(), &policy);
+        let keep = Destination::new(Address::Domain("www.example.test".into()), 443);
+        opened
+            .policy()
+            .authorize_udp_destination(&keep)
+            .expect("suffix allow");
+        let other = Destination::new(Address::Domain("evil.test".into()), 443);
+        assert!(opened.policy().authorize_udp_destination(&other).is_err());
     }
 
     #[test]

@@ -633,6 +633,7 @@ impl VisionHandler {
                                 user_id,
                                 bind_dest,
                                 inbound_tag,
+                                &outbound_tag,
                                 vision_wire_for_transfer,
                                 client_random,
                             )
@@ -1069,6 +1070,7 @@ impl VisionHandler {
         user_id: UserId,
         destination: Destination,
         inbound_tag: &str,
+        outbound_tag: &str,
         prefetched_vision_wire: Vec<u8>,
         client_random: [u8; 32],
     ) -> Result<VisionRelayStats, VisionSessionError> {
@@ -1087,7 +1089,9 @@ impl VisionHandler {
                 .map_err(|_| HandoffLineError::Transfer(HandoffError::State))
                 .map_err(VisionSessionError::HandoffLine)?
                 .into_parts();
-            let policy = HandoffPolicySnapshot::xudp_initial(destination.clone());
+            let policy =
+                self.routing
+                    .seal_handoff_xudp_policy(user_id, outbound_tag, destination.clone());
             let state = ContinuationState::new(
                 suite,
                 client_traffic_secret,
@@ -1348,7 +1352,7 @@ pub(crate) async fn run_resumed_xudp_session(
         for packet in packets.drain(..) {
             // First New: LINE already authorized transfer; dial the sealed
             // (DNS-resolved) initial destination. Later Keep rewrites must pass
-            // the sealed policy snapshot (fail closed when rewrites disabled).
+            // the sealed policy snapshot (ordered rules + default outbound).
             let authorized = if association.is_none() {
                 if packet.destination.is_none() {
                     return Err(VisionSessionError::Xudp(
