@@ -156,9 +156,19 @@ a missing receipt or SKIP token:
 | stock Xray | Handoff | `stock-xray-handoff-xudp` |
 
 Adversarial lifecycle covers Keep rewrite security, GlobalID capacity,
-association cancel/recover, repeated fault-cycle resource recovery, and the
-no-silent-Direct fallback fence for NXR/Handoff. TCP Vision client paths are
-re-exercised after the XUDP gates (`tcp-non-regression`). Hosted QEMU specialist
-cells remain the independent-kernel TCP/stress authority (ADR 0036); UDP
-six-cell merge authority for v2.2.0 is Exact-head Native.
+association cancel/recover, repeated fault-cycle resource recovery, NXR frame
+replay/bad-MAC rejection, cross-outbound Keep fences, reload-style retirement
+without mid-life authority widening, and the no-silent-Direct fallback fence
+for NXR/Handoff. TCP Vision client paths are re-exercised after the XUDP gates
+(`tcp-non-regression`).
+
+### QEMU / Frozen UDP acceptance (PR7)
+
+| Layer | Role |
+| --- | --- |
+| Exact-head Native | Six client×topology UDP cells + adversarial + H3 (merge authority for functional UDP) |
+| QEMU specialist | Four **TCP** independent-kernel cells (ADR 0036) **plus** four **UDP** process E2E cells: `nxr`/`handoff` × `ordinary`/`constrained` (descriptor-bounded). Guest user-mode NAT is TCP-oriented; UDP gates share the QEMU workflow candidate SHA and pinned fixtures rather than guest SOCKS UDP ASSOCIATE. |
+| Frozen aggregate | Fail-closed on both the TCP four-cell VM campaign **and** the QEMU UDP four-cell receipts, and binds Exact-head Native six-cell + adversarial receipts for the same SHA |
+
+Never treat TCP-only QEMU success as UDP completion.
 

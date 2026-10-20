@@ -608,6 +608,44 @@ jobs:
               | tee -a "$Q/xudp-six-cell/receipt.txt"
           done
           printf 'verdict=PASS\ncells=6\n' | tee -a "$Q/xudp-six-cell/receipt.txt"
+      - name: Constrained-resource NXR/Handoff UDP (descriptor bound)
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          # PR7: ordinary six-cell already ran; this gate proves recovery under
+          # a tight RLIMIT_NOFILE (Frozen QEMU UDP constrained twin on Native).
+          mkdir -p "$Q/xudp-constrained"
+          {
+            printf 'source=%s\nrun=%s\nattempt=%s\n' \
+              "$HEAD_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf 'gate=xudp-nxr-handoff-constrained-nofile\n'
+            printf 'ulimit_nofile=256\n'
+          } | tee "$Q/xudp-constrained/identity.txt"
+          LOG="$Q/xudp-constrained/cargo-test.log"
+          set +e
+          ( ulimit -n 256; cargo test --locked \
+              --test xudp_nxr_e2e --test xudp_handoff_e2e -- --nocapture ) \
+            2>&1 | tee "$LOG"
+          status=${PIPESTATUS[0]}
+          set -e
+          if ! grep -E 'test result: ok\.' "$LOG"; then
+            printf '%s\n' 'FAIL: constrained NXR/Handoff UDP did not report ok' >&2
+            exit 1
+          fi
+          if grep -Eiq 'skip|ignored as pass|not run' "$LOG"; then
+            printf '%s\n' 'FAIL: SKIP token under constrained UDP' >&2
+            exit 1
+          fi
+          if ! grep -F 'landing_udp_sender_proof' "$LOG"; then
+            printf '%s\n' 'FAIL: missing LANDING UDP sender proof under constrained' >&2
+            exit 1
+          fi
+          test "$status" -eq 0
+          {
+            printf 'verdict=PASS\n'
+            printf 'status=%s\n' "$status"
+            grep -E 'test result:|landing_udp_sender_proof' "$LOG" | tail -n40
+          } | tee "$Q/xudp-constrained/receipt.txt"
       - name: TCP non-regression after XUDP gates
         timeout-minutes: 10
         run: |
@@ -733,6 +771,7 @@ jobs:
               'xudp-adversarial/identity.txt', 'xudp-adversarial/receipt.txt',
               'xudp-adversarial/cargo-test.log',
               'xudp-six-cell/identity.txt', 'xudp-six-cell/receipt.txt',
+              'xudp-constrained/identity.txt', 'xudp-constrained/receipt.txt',
               'tcp-non-regression/identity.txt', 'tcp-non-regression/receipt.txt',
               'xudp-udp-perf/identity.txt', 'xudp-udp-perf/receipt.txt',
               'xudp-udp-perf/cargo-test.log',

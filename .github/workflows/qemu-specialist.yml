@@ -2,9 +2,11 @@ name: QEMU specialist qualification
 
 # Independent-kernel/resource-profile qualification runs on a frozen review
 # candidate or an explicit operator dispatch, not every draft edit.
-# Four contract cells run as an Actions matrix (ADR 0042): ordinary hosted
+# Four TCP contract cells run as an Actions matrix (ADR 0042): ordinary hosted
 # runners have one cell's non-overlapping vCPU budget, so same-host parallel
 # would oversubscribe constrained profiles. Merge remains fail-closed.
+# PR7 also runs a four-cell NXR/Handoff UDP matrix (ordinary+constrained) on the
+# same candidate SHA so Frozen acceptance proves UDP, not only TCP VM cells.
 on:
   workflow_call:
     inputs:
@@ -376,10 +378,128 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+
+  # PR7 / #314 / ADR 0060: NXR+Handoff UDP under ordinary and constrained
+  # resource profiles. Runs on the QEMU specialist workflow (Frozen path) so
+  # the Frozen aggregate proves UDP — not only the four TCP VM cells.
+  # Guest user-mode NAT is TCP-oriented; these are fail-closed process E2E
+  # gates on the same exact candidate SHA and pinned fixtures as the VM cells.
+  qemu-udp-matrix:
+    name: QEMU UDP ${{ matrix.topology }}/${{ matrix.profile }}
+    needs: qemu-prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - topology: nxr
+            profile: ordinary
+            slug: nxr-ordinary
+            test: xudp_nxr_e2e
+          - topology: handoff
+            profile: ordinary
+            slug: handoff-ordinary
+            test: xudp_handoff_e2e
+          - topology: nxr
+            profile: constrained
+            slug: nxr-constrained
+            test: xudp_nxr_e2e
+          - topology: handoff
+            profile: constrained
+            slug: handoff-constrained
+            test: xudp_handoff_e2e
+    env:
+      HEAD_SHA: ${{ inputs.candidate_sha || github.event.pull_request.head.sha || github.sha }}
+      CARGO_TERM_COLOR: never
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ env.HEAD_SHA }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Restore shared prepare fixtures
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: hosted-qemu-prepare-${{ env.HEAD_SHA }}
+          path: ${{ runner.temp }}/rr-qemu-prepare
+      - name: Run NXR/Handoff UDP E2E under profile
+        timeout-minutes: 40
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential curl ca-certificates
+          rustup toolchain install
+          export XRAY_BIN="$RUNNER_TEMP/rr-qemu-prepare/tools/xray/xray"
+          export OPENSSL_BIN="$RUNNER_TEMP/rr-qemu-prepare/tools/openssl/bin/openssl"
+          test -x "$XRAY_BIN"
+          test -x "$OPENSSL_BIN"
+          export PATH="$(dirname "$OPENSSL_BIN"):$PATH"
+          chmod 0755 "$XRAY_BIN" "$OPENSSL_BIN"
+          OUT="$RUNNER_TEMP/qemu-udp-${{ matrix.slug }}"
+          mkdir -p "$OUT"
+          {
+            printf 'source=%s\nrun=%s\nattempt=%s\n' \
+              "$HEAD_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf 'gate=qemu-udp-%s-%s\n' "${{ matrix.topology }}" "${{ matrix.profile }}"
+            printf 'cell=%s/%s\n' "${{ matrix.topology }}" "${{ matrix.profile }}"
+            printf 'test=%s\n' "${{ matrix.test }}"
+            "$XRAY_BIN" version
+            "$OPENSSL_BIN" version -a
+            sha256sum "$XRAY_BIN" "$OPENSSL_BIN"
+          } | tee "$OUT/identity.txt"
+          LOG="$OUT/cargo-test.log"
+          run_tests() {
+            cargo test --locked --test "${{ matrix.test }}" -- --nocapture
+          }
+          set +e
+          if [ "${{ matrix.profile }}" = "constrained" ]; then
+            # Bounded descriptors: association recovery must not leak FDs.
+            ( ulimit -n 256; run_tests ) 2>&1 | tee "$LOG"
+            status=${PIPESTATUS[0]}
+          else
+            run_tests 2>&1 | tee "$LOG"
+            status=${PIPESTATUS[0]}
+          fi
+          set -e
+          if ! grep -E 'test result: ok\.' "$LOG"; then
+            printf '%s\n' "FAIL: ${{ matrix.slug }} did not report ok" >&2
+            exit 1
+          fi
+          if grep -E 'test result:.*[^0-9]0 passed' "$LOG"; then
+            printf '%s\n' "FAIL: ${{ matrix.slug }} passed zero cases" >&2
+            exit 1
+          fi
+          if grep -Eiq 'skip: XRAY_BIN|XRAY_BIN unset|ignored as pass|not run' "$LOG"; then
+            printf '%s\n' "FAIL: silent SKIP token in ${{ matrix.slug }}" >&2
+            exit 1
+          fi
+          if ! grep -F 'landing_udp_sender_proof' "$LOG"; then
+            printf '%s\n' "FAIL: missing LANDING UDP sender proof in ${{ matrix.slug }}" >&2
+            exit 1
+          fi
+          test "$status" -eq 0
+          {
+            printf 'verdict=PASS\n'
+            printf 'status=%s\n' "$status"
+            printf 'profile=%s\n' "${{ matrix.profile }}"
+            grep -E 'test result:|landing_udp_sender_proof| PASS' "$LOG" | tail -n60
+          } | tee "$OUT/receipt.txt"
+      - name: Retain QEMU UDP cell receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: hosted-qemu-udp-${{ env.HEAD_SHA }}-${{ matrix.slug }}
+          path: ${{ runner.temp }}/qemu-udp-${{ matrix.slug }}/
+          if-no-files-found: warn
+          retention-days: 7
+
   qemu-aggregate:
     name: Merge four-cell QEMU evidence
-    needs: qemu-cell
-    if: always() && needs.qemu-cell.result != 'cancelled'
+    needs: [qemu-cell, qemu-udp-matrix]
+    if: always() && needs.qemu-cell.result != 'cancelled' && needs.qemu-udp-matrix.result != 'cancelled'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -420,6 +540,51 @@ jobs:
           cp "$RUNNER_TEMP/rr-qemu-prepare/tools/openssl/ssl/openssl.cnf" "$RUNNER_TEMP/rr-cloud-campaign/openssl.cnf"
           chmod 0755 "$RUNNER_TEMP/rr-cloud-campaign/rr-dev" "$RUNNER_TEMP/rr-cloud-campaign/rust-reality" \
             "$RUNNER_TEMP/rr-cloud-campaign/xray" "$RUNNER_TEMP/rr-cloud-campaign/openssl"
+
+      - name: Restore QEMU UDP cell receipts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: hosted-qemu-udp-${{ env.HEAD_SHA }}-*
+          path: ${{ runner.temp }}/rr-qemu-udp
+          merge-multiple: false
+      - name: Aggregate QEMU UDP four-cell fail-closed
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/rr-cloud-campaign/qemu-udp"
+          mkdir -p "$OUT"
+          {
+            printf 'source=%s\nrun=%s\nattempt=%s\n' \
+              "$HEAD_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf 'gate=qemu-udp-four-cell-aggregate\n'
+            printf 'cells=nxr/ordinary,handoff/ordinary,nxr/constrained,handoff/constrained\n'
+          } | tee "$OUT/identity.txt"
+          : > "$OUT/receipt.txt"
+          for slug in nxr-ordinary handoff-ordinary nxr-constrained handoff-constrained; do
+            receipt="$(find "$RUNNER_TEMP/rr-qemu-udp" -type f -path "*${slug}*" -name receipt.txt | head -n1 || true)"
+            if test -z "$receipt" || test ! -f "$receipt"; then
+              printf '%s\n' "FAIL: missing QEMU UDP receipt for $slug" >&2
+              find "$RUNNER_TEMP/rr-qemu-udp" -type f 2>/dev/null | head -n80 >&2 || true
+              exit 1
+            fi
+            if grep -Eiq 'skip|ignored as pass|not run' "$receipt"; then
+              printf '%s\n' "FAIL: SKIP token in $slug" >&2
+              cat "$receipt" >&2
+              exit 1
+            fi
+            if ! grep -Eiq 'verdict=PASS' "$receipt"; then
+              printf '%s\n' "FAIL: $slug lacks verdict=PASS" >&2
+              cat "$receipt" >&2
+              exit 1
+            fi
+            cp "$receipt" "$OUT/$slug-receipt.txt"
+            idf="$(dirname "$receipt")/identity.txt"
+            if test -f "$idf"; then
+              cp "$idf" "$OUT/$slug-identity.txt"
+            fi
+            printf 'cell=%s verdict=PASS receipt=%s\n' "$slug" "$receipt" | tee -a "$OUT/receipt.txt"
+          done
+          printf 'verdict=PASS\ncells=4\n' | tee -a "$OUT/receipt.txt"
+
       - name: Retain campaign evidence without private fixture material
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

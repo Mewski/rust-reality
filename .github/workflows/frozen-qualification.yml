@@ -167,6 +167,95 @@ jobs:
             "$BUNDLE/rr-dev" --repo "$GITHUB_WORKSPACE" bench stability-check \
               --evidence "$BUNDLE/evidence.json" --case "$check" --run-id "$run_id"
           done
+      - name: Require QEMU NXR/Handoff UDP four-cell evidence in campaign
+        run: |
+          set -euo pipefail
+          # PR7 / #314: Frozen aggregate must prove UDP for NXR+Handoff under
+          # ordinary and constrained profiles (not TCP-only VM cells).
+          UDP="$BUNDLE/qemu-udp"
+          test -d "$UDP"
+          test -f "$UDP/receipt.txt"
+          test -f "$UDP/identity.txt"
+          if grep -Eiq 'skip|ignored as pass|not run' "$UDP/receipt.txt"; then
+            printf '%s\n' 'FAIL: SKIP token in qemu-udp aggregate' >&2
+            cat "$UDP/receipt.txt" >&2
+            exit 1
+          fi
+          if ! grep -Eq 'verdict=PASS' "$UDP/receipt.txt"; then
+            printf '%s\n' 'FAIL: qemu-udp aggregate lacks verdict=PASS' >&2
+            exit 1
+          fi
+          if ! grep -Eq 'cells=4' "$UDP/receipt.txt"; then
+            printf '%s\n' 'FAIL: qemu-udp aggregate must list cells=4' >&2
+            exit 1
+          fi
+          for slug in nxr-ordinary handoff-ordinary nxr-constrained handoff-constrained; do
+            test -f "$UDP/$slug-receipt.txt"
+            grep -Eq 'verdict=PASS' "$UDP/$slug-receipt.txt"
+          done
+          printf 'frozen-qemu-udp-four-cell verdict=PASS\n'
+      - name: Bind Exact-head Native XUDP six-cell into Frozen evidence
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          # Fail closed if Exact-head Native has not retained the six-cell matrix.
+          mkdir -p "$BUNDLE/native-xudp"
+          gh run list --repo "$GITHUB_REPOSITORY" --commit "$HEAD_SHA" \
+            --workflow qualification.yml --limit 5 \
+            --json headSha,status,conclusion,databaseId,name > "$RUNNER_TEMP/native-runs.json"
+          run_id=$(python3 - <<'PY'
+          import json, os, pathlib
+          runs = json.loads((pathlib.Path(os.environ['RUNNER_TEMP'])/'native-runs.json').read_text())
+          ok = [r for r in runs
+                if r.get('headSha') == os.environ['HEAD_SHA']
+                and r.get('status') == 'completed'
+                and r.get('conclusion') == 'success']
+          if not ok:
+              raise SystemExit('Exact-head Native qualification success missing for this SHA')
+          print(ok[0]['databaseId'])
+          PY
+          )
+          gh run download "$run_id" --repo "$GITHUB_REPOSITORY" \
+            --name "native-qualification-${HEAD_SHA}" \
+            --dir "$BUNDLE/native-xudp" || \
+          gh run download "$run_id" --repo "$GITHUB_REPOSITORY" \
+            --dir "$BUNDLE/native-xudp"
+          six=""
+          adv=""
+          while IFS= read -r -d '' f; do
+            case "$f" in
+              */xudp-six-cell/receipt.txt) six="$f" ;;
+              */xudp-adversarial/receipt.txt) adv="$f" ;;
+            esac
+          done < <(find "$BUNDLE/native-xudp" -name receipt.txt -print0)
+          if test -z "$six" || test ! -f "$six"; then
+            # Some retain layouts flatten; search by content gate marker via identity
+            six="$(find "$BUNDLE/native-xudp" -type f -name receipt.txt | while read -r p; do
+              idf="$(dirname "$p")/identity.txt"
+              if test -f "$idf" && grep -Fq 'gate=udp-topology-six-cell-matrix' "$idf"; then
+                echo "$p"; break
+              fi
+            done)"
+          fi
+          if test -z "$adv" || test ! -f "$adv"; then
+            adv="$(find "$BUNDLE/native-xudp" -type f -name receipt.txt | while read -r p; do
+              idf="$(dirname "$p")/identity.txt"
+              if test -f "$idf" && grep -Fq 'gate=mandatory-xudp-adversarial-lifecycle' "$idf"; then
+                echo "$p"; break
+              fi
+            done)"
+          fi
+          test -n "$six" && test -f "$six"
+          test -n "$adv" && test -f "$adv"
+          grep -Eq 'verdict=PASS|cells=6' "$six"
+          grep -Eq 'verdict=PASS' "$adv"
+          if grep -Eiq 'skip|ignored as pass|not run' "$six" "$adv"; then
+            printf '%s\n' 'FAIL: SKIP in Native XUDP receipts' >&2
+            exit 1
+          fi
+          cp "$six" "$BUNDLE/native-xudp/six-cell-receipt.txt"
+          cp "$adv" "$BUNDLE/native-xudp/adversarial-receipt.txt"
+          printf 'frozen-native-xudp-six-cell verdict=PASS native_run=%s\n' "$run_id"
       - name: Require the complete frozen offline verdict
         run: |
           "$BUNDLE/rr-dev" --repo "$GITHUB_WORKSPACE" bench stability-evaluate \
