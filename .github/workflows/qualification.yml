@@ -129,7 +129,29 @@ jobs:
         timeout-minutes: 15
         run: |
           set -euo pipefail
-          cargo test --locked --test client_socks5_udp_e2e -- --nocapture
+          # PR7 six-cell matrix: rust×Direct cell receipt (no silent SKIP).
+          mkdir -p "$Q/rust-direct-xudp"
+          {
+            printf 'source=%s\nrun=%s\nattempt=%s\n' \
+              "$HEAD_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf 'gate=rust-client-direct-xudp\n'
+            printf 'cell=rust/direct\n'
+          } | tee "$Q/rust-direct-xudp/identity.txt"
+          LOG="$Q/rust-direct-xudp/cargo-test.log"
+          cargo test --locked --test client_socks5_udp_e2e -- --nocapture 2>&1 | tee "$LOG"
+          if ! grep -E 'test result: ok\.' "$LOG"; then
+            printf '%s\n' 'FAIL: rust×Direct XUDP cell did not report ok' >&2
+            exit 1
+          fi
+          if grep -E 'test result:.*[^0-9]0 passed' "$LOG"; then
+            printf '%s\n' 'FAIL: rust×Direct XUDP cell passed zero cases' >&2
+            exit 1
+          fi
+          {
+            printf 'verdict=PASS\n'
+            printf 'cell=rust/direct\n'
+            grep -E 'test result:| PASS' "$LOG" | tail -n40
+          } | tee "$Q/rust-direct-xudp/receipt.txt"
       - name: NXR XUDP process E2E (echo, multi-dest, Block, teardown)
         timeout-minutes: 15
         run: |
@@ -543,6 +565,76 @@ jobs:
             printf 'status=%s\n' "$status"
             grep -E 'test result:| PASS$' "$LOG" | tail -n40
           } | tee "$Q/xudp-adversarial/receipt.txt"
+      - name: UDP topology six-cell matrix (no silent SKIP)
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          # PR7 / #314: six client×topology cells must all have PASS receipts.
+          # Aggregation is fail-closed — missing receipt or SKIP token is FAIL.
+          mkdir -p "$Q/xudp-six-cell"
+          {
+            printf 'source=%s\nrun=%s\nattempt=%s\n' \
+              "$HEAD_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf 'gate=udp-topology-six-cell-matrix\n'
+            printf 'cells=rust/direct,rust/nxr,rust/handoff,xray/direct,xray/nxr,xray/handoff\n'
+          } | tee "$Q/xudp-six-cell/identity.txt"
+          declare -a CELLS=(
+            "rust/direct|$Q/rust-direct-xudp/receipt.txt"
+            "rust/nxr|$Q/nxr-xudp-e2e/receipt.txt"
+            "rust/handoff|$Q/handoff-xudp-e2e/receipt.txt"
+            "xray/direct|$Q/stock-xray-xudp/receipt.txt"
+            "xray/nxr|$Q/stock-xray-nxr-xudp/receipt.txt"
+            "xray/handoff|$Q/stock-xray-handoff-xudp/receipt.txt"
+          )
+          : > "$Q/xudp-six-cell/receipt.txt"
+          for entry in "${CELLS[@]}"; do
+            cell="${entry%%|*}"
+            receipt="${entry#*|}"
+            if test ! -f "$receipt"; then
+              printf '%s\n' "FAIL: missing six-cell receipt for $cell ($receipt)" >&2
+              exit 1
+            fi
+            if grep -Eiq 'skip|ignored as pass|not run' "$receipt"; then
+              printf '%s\n' "FAIL: silent SKIP token in $cell receipt" >&2
+              cat "$receipt" >&2
+              exit 1
+            fi
+            if ! grep -Eiq 'verdict=PASS|test result: ok\.|landing_udp_sender_proof' "$receipt"; then
+              printf '%s\n' "FAIL: $cell receipt lacks PASS marker" >&2
+              cat "$receipt" >&2
+              exit 1
+            fi
+            printf 'cell=%s verdict=PASS receipt=%s\n' "$cell" "$receipt" \
+              | tee -a "$Q/xudp-six-cell/receipt.txt"
+          done
+          printf 'verdict=PASS\ncells=6\n' | tee -a "$Q/xudp-six-cell/receipt.txt"
+      - name: TCP non-regression after XUDP gates
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          # PR7: XUDP work must not regress TCP Vision client paths.
+          mkdir -p "$Q/tcp-non-regression"
+          {
+            printf 'source=%s\nrun=%s\nattempt=%s\n' \
+              "$HEAD_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf 'gate=tcp-non-regression-after-xudp\n'
+          } | tee "$Q/tcp-non-regression/identity.txt"
+          LOG="$Q/tcp-non-regression/cargo-test.log"
+          cargo test --locked \
+            --test client_socks5_e2e --test client_http_connect_e2e --test client_multi_line_e2e \
+            -- --nocapture 2>&1 | tee "$LOG"
+          if ! grep -E 'test result: ok\.' "$LOG"; then
+            printf '%s\n' 'FAIL: TCP non-regression suite did not report ok' >&2
+            exit 1
+          fi
+          if grep -E 'test result:.*[^0-9]0 passed' "$LOG"; then
+            printf '%s\n' 'FAIL: TCP non-regression passed zero cases' >&2
+            exit 1
+          fi
+          {
+            printf 'verdict=PASS\n'
+            grep -E 'test result:' "$LOG" | tail -n20
+          } | tee "$Q/tcp-non-regression/receipt.txt"
       - name: Quantitative UDP/XUDP loopback RTT (A/A noise)
         timeout-minutes: 10
         run: |
@@ -628,10 +720,20 @@ jobs:
               'frozen/binary/rust-reality',
               'stock-xray-xudp/identity.txt', 'stock-xray-xudp/receipt.txt',
               'stock-xray-xudp/cargo-test.log',
+              'rust-direct-xudp/identity.txt', 'rust-direct-xudp/receipt.txt',
+              'rust-direct-xudp/cargo-test.log',
+              'nxr-xudp-e2e/identity.txt', 'nxr-xudp-e2e/receipt.txt',
+              'handoff-xudp-e2e/identity.txt', 'handoff-xudp-e2e/receipt.txt',
+              'stock-xray-nxr-xudp/identity.txt', 'stock-xray-nxr-xudp/receipt.txt',
+              'stock-xray-handoff-xudp/identity.txt', 'stock-xray-handoff-xudp/receipt.txt',
+              'nxr-udp443-h3/identity.txt', 'nxr-udp443-h3/receipt.txt',
+              'handoff-udp443-h3/identity.txt', 'handoff-udp443-h3/receipt.txt',
               'quic-h3-udp443/identity.txt', 'quic-h3-udp443/receipt.txt',
               'quic-h3-udp443/cargo-test.log',
               'xudp-adversarial/identity.txt', 'xudp-adversarial/receipt.txt',
               'xudp-adversarial/cargo-test.log',
+              'xudp-six-cell/identity.txt', 'xudp-six-cell/receipt.txt',
+              'tcp-non-regression/identity.txt', 'tcp-non-regression/receipt.txt',
               'xudp-udp-perf/identity.txt', 'xudp-udp-perf/receipt.txt',
               'xudp-udp-perf/cargo-test.log',
               'interop/summary.json', 'interop/environment.json', 'interop/completion.json',

@@ -401,3 +401,72 @@ fn keep_without_rewrite_preserves_status() {
     assert_eq!(pkt.status, XudpSessionStatus::Keep);
     assert!(pkt.destination.is_none());
 }
+
+/// PR7 fault matrix: after N open→close→purge cycles the GlobalID map returns
+/// to empty (resource recovery). No silent growth across recovered cycles.
+#[tokio::test]
+async fn association_resource_recovery_after_repeated_fault_cycles() {
+    let echo = UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
+    let dest = dest_ip([127, 0, 0, 1], echo.local_addr().unwrap().port());
+    let globals = XudpGlobalMap::new();
+    let owner = [0xA1; 16];
+    let cycles = 8usize;
+    for i in 0..cycles {
+        let mut gid = [0xA1_u8; 8];
+        gid[7] = i as u8;
+        let now = Instant::now();
+        let mut assoc =
+            XudpDirectAssociation::open(&dest, Some(gid), owner, &globals, now, None)
+                .await
+                .unwrap();
+        assert_eq!(globals.len(), 1, "cycle {i}: one live association");
+        let open = packet_new(&dest, b"pulse", Some(gid));
+        assoc
+            .handle_uplink_packet(&open, Some(&dest), Instant::now())
+            .await
+            .unwrap();
+        let mut buf = [0u8; 8];
+        let (n, _) = echo.recv_from(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"pulse");
+        // Induced "fault": cancel / expire / purge — like LINE reload retiring
+        // an association without leaking the GlobalID slot.
+        assoc.close(&globals, Instant::now());
+        globals.purge(Instant::now() + XUDP_ASSOCIATION_IDLE + Duration::from_secs(1));
+        assert_eq!(globals.len(), 0, "cycle {i}: recovered to empty map");
+    }
+    eprintln!(
+        "association_resource_recovery_after_repeated_fault_cycles PASS (cycles={cycles})"
+    );
+}
+
+/// PR7: NXR and Handoff remain distinct egress capabilities across a Keep
+/// rewrite authorization fence — never collapse to Direct (no silent fallback).
+#[test]
+fn fault_matrix_nxr_handoff_never_silent_direct_fallback() {
+    for class in [XudpRouteClass::Nxr, XudpRouteClass::Handoff] {
+        let cap = authorize_xudp_egress(class).expect("authorized topology");
+        assert_ne!(
+            cap,
+            XudpEgressCapability::Direct,
+            "{class:?} must not authorize as Direct"
+        );
+        assert!(
+            require_direct_xudp_route(class).is_err(),
+            "{class:?} must fail Direct landward (no silent Direct fallback)"
+        );
+        assert!(
+            matches!(
+                require_direct_xudp_landward(cap),
+                Err(XudpOutboundUnsupported::Nxr | XudpOutboundUnsupported::Handoff)
+            ),
+            "{class:?} Direct landward gate must reject capability {cap:?}"
+        );
+    }
+    // Block / Unsupported stay fail-closed at authorization.
+    for class in [XudpRouteClass::Block, XudpRouteClass::Unsupported] {
+        assert!(authorize_xudp_egress(class).is_err());
+    }
+    eprintln!("fault_matrix_nxr_handoff_never_silent_direct_fallback PASS");
+}
