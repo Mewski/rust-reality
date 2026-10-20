@@ -24,8 +24,9 @@ use rust_reality::protocol::vless::{
 };
 use rust_reality::server::xudp::{
     XUDP_ASSOCIATION_IDLE, XUDP_MAX_ASSOCIATIONS, XudpDirectAssociation, XudpEgressCapability,
-    XudpGlobalMap, XudpOutboundUnsupported, XudpRouteClass, XudpSessionError, drain_xudp_frames,
-    authorize_xudp_egress, require_direct_xudp_landward, require_direct_xudp_route,
+    XudpGlobalMap, XudpOutboundUnsupported, XudpRouteClass, XudpSessionError,
+    authorize_xudp_egress, drain_xudp_frames, require_direct_xudp_landward,
+    require_direct_xudp_route,
 };
 use tokio::net::UdpSocket;
 
