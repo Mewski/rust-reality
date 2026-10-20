@@ -679,6 +679,7 @@ impl VisionHandler {
                                     *user_id.as_bytes(),
                                     globals,
                                     now,
+                                    None,
                                 )
                                 .await
                                 .map_err(VisionSessionError::Xudp)?,
@@ -1297,6 +1298,7 @@ pub(crate) async fn run_resumed_xudp_session(
     prefetched_plaintext: Vec<u8>,
     policy: HandoffPolicySnapshot,
     timeout: Duration,
+    udp_bind_ip: Option<std::net::IpAddr>,
 ) -> Result<VisionRelayStats, VisionSessionError> {
     let activity = Arc::new(SessionActivity::default());
     client_writer.set_activity(Arc::clone(&activity));
@@ -1378,6 +1380,7 @@ pub(crate) async fn run_resumed_xudp_session(
                         *user_id.as_bytes(),
                         globals,
                         now,
+                        udp_bind_ip,
                     )
                     .await
                     .map_err(VisionSessionError::Xudp)?,

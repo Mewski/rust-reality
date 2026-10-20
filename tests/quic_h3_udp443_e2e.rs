@@ -405,6 +405,123 @@ fn start_rr_nxr_stack(
     (socks_port, cover, landing, entry, client)
 }
 
+/// LINE on 127.0.0.1 + Handoff LANDING on 127.0.0.2 (UDP source proof).
+fn start_rr_handoff_stack(
+    root: &Path,
+    allow_udp_443: bool,
+) -> (u16, KillOnDrop, KillOnDrop, KillOnDrop, KillOnDrop) {
+    let (cover_port, cover) = start_openssl_cover(root);
+    let (reality_private, reality_public) = generate_x25519();
+    let (landing_private, landing_public) = generate_x25519();
+    let user_id = generate("uuid");
+    let short_id = generate("short-id");
+    let psk = generate("psk");
+    let entry_port = free_port();
+    let landing_port = free_port();
+    let socks_port = free_port();
+    let allow_line = if allow_udp_443 {
+        r#", "allowUdp443": true"#
+    } else {
+        ""
+    };
+    write(
+        &root.join("landing.json"),
+        &format!(
+            r#"{{
+  "role": "landing",
+  "listeners": [{{ "port": {landing_port}, "ip": "ipv4Only", "ipv4": "127.0.0.2" }}],
+  "landing": {{
+    "protocol": "handoff",
+    "psk": "{psk}",
+    "privateKey": "{landing_private}"
+  }}
+}}
+"#
+        ),
+    );
+    write(
+        &root.join("entry.json"),
+        &format!(
+            r#"{{
+  "role": "entry",
+  "listeners": [{{ "port": {entry_port}, "ipv4": "127.0.0.1" }}],
+  "reality": {{
+    "cover": "localhost:{cover_port}",
+    "privateKey": "{reality_private}",
+    "serverNames": ["localhost"],
+    "coverOptimization": {{ "enabled": false }}
+  }},
+  "users": [{{
+    "id": "{user_id}",
+    "shortIds": ["{short_id}"],
+    "label": "udp443-handoff"
+  }}],
+  "outbounds": {{
+    "landing-1": {{
+      "type": "handoff",
+      "address": "127.0.0.2",
+      "port": {landing_port},
+      "psk": "{psk}",
+      "landingPublicKey": "{landing_public}",
+      "warmTcp": false
+    }}
+  }},
+  "routing": {{ "default": "landing-1" }}
+}}
+"#
+        ),
+    );
+    write(
+        &root.join("client.json"),
+        &format!(
+            r#"{{
+  "role": "client",
+  "listeners": [{{ "port": {socks_port}, "ipv4": "127.0.0.1" }}],
+  "lines": [{{
+    "address": "127.0.0.1",
+    "port": {entry_port},
+    "id": "{user_id}",
+    "publicKey": "{reality_public}",
+    "shortId": "{short_id}",
+    "serverName": "localhost"{allow_line}
+  }}]
+}}
+"#
+        ),
+    );
+    let landing = spawn_logged(
+        "landing",
+        {
+            let mut c = Command::new(bin());
+            c.args(["run", "--config"]).arg(root.join("landing.json"));
+            c
+        },
+        &root.join("landing.log"),
+    );
+    wait_tcp_addr("127.0.0.2", landing_port, Duration::from_secs(20));
+    let entry = spawn_logged(
+        "entry",
+        {
+            let mut c = Command::new(bin());
+            c.args(["run", "--config"]).arg(root.join("entry.json"));
+            c
+        },
+        &root.join("entry.log"),
+    );
+    wait_tcp(entry_port, Duration::from_secs(20));
+    let client = spawn_logged(
+        "client",
+        {
+            let mut c = Command::new(bin());
+            c.args(["run", "--config"]).arg(root.join("client.json"));
+            c
+        },
+        &root.join("client.log"),
+    );
+    wait_tcp(socks_port, Duration::from_secs(20));
+    (socks_port, cover, landing, entry, client)
+}
+
 fn wait_tcp_addr(ip: &str, port: u16, budget: Duration) {
     let deadline = Instant::now() + budget;
     loop {
@@ -1352,5 +1469,460 @@ async fn stock_xray_client_nxr_genuine_http3_udp443() {
         "stock Xray NXR H3 origin peers must include LANDING 127.0.0.2, got {peers:?}"
     );
     eprintln!("stock_xray_client_nxr_genuine_http3_udp443 PASS peers={peers:?}");
+    client_endpoint.close(0u32.into(), b"done");
+}
+
+/// Genuine HTTP/3 through Handoff LANDING UDP/443 (ADR 0060 / #314 PR6).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires CAP_NET_BIND_SERVICE + Quinn/h3; Exact-head Native runs with --ignored"]
+async fn genuine_http3_over_handoff_xudp_udp443_no_tcp_fallback() {
+    require_udp443_capability();
+    let root = std::env::temp_dir().join(format!("rr-h3-handoff-udp443-{}", free_port()));
+    fs::create_dir_all(&root).unwrap();
+    let _guard = DirGuard(root.clone());
+
+    let (socks_port, _cover, _landing, _entry, _client) = tokio::task::spawn_blocking({
+        let root = root.clone();
+        move || start_rr_handoff_stack(&root, true)
+    })
+    .await
+    .expect("handoff stack join");
+
+    let tcp_hits = Arc::new(AtomicUsize::new(0));
+    let tcp_hits_bg = tcp_hits.clone();
+    let tcp_watch = TcpListener::bind(DEST_443).expect("TCP watchdog");
+    tcp_watch.set_nonblocking(true).ok();
+    thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while Instant::now() < deadline {
+            if tcp_watch.accept().is_ok() {
+                tcp_hits_bg.fetch_add(1, Ordering::SeqCst);
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    });
+
+    let origin_peers = Arc::new(std::sync::Mutex::new(Vec::<SocketAddr>::new()));
+    let (cert, key, roots) = make_h3_certs();
+    let mut server_crypto = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert.clone()], key.into())
+        .expect("server cert");
+    server_crypto.alpn_protocols = vec![b"h3".to_vec()];
+    let mut server_config =
+        ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto).unwrap()));
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_idle_timeout(Some(Duration::from_secs(60).try_into().unwrap()));
+    transport.initial_mtu(1200);
+    server_config.transport = Arc::new(transport);
+
+    let server_sock = StdUdpSocket::bind(DEST_443).expect("H3 origin UDP/443");
+    assert_eq!(server_sock.local_addr().unwrap().port(), 443);
+    let server = Endpoint::new(
+        EndpointConfig::default(),
+        Some(server_config),
+        server_sock,
+        quinn::default_runtime().expect("tokio runtime"),
+    )
+    .expect("server endpoint");
+
+    let peers_bg = origin_peers.clone();
+    let server_task = tokio::spawn(async move {
+        let incoming = server
+            .accept()
+            .await
+            .expect("accept")
+            .await
+            .expect("handshake");
+        peers_bg.lock().unwrap().push(incoming.remote_address());
+        let origin_alpn = incoming
+            .handshake_data()
+            .and_then(|data| data.downcast::<quinn::crypto::rustls::HandshakeData>().ok())
+            .and_then(|hs| hs.protocol)
+            .unwrap_or_default();
+        assert_eq!(origin_alpn.as_slice(), b"h3", "origin ALPN must be h3");
+        let mut h3 = h3::server::builder()
+            .build(h3_quinn::Connection::new(incoming))
+            .await
+            .expect("h3 server");
+        let mut handled = 0usize;
+        while let Ok(Some(resolver)) = h3.accept().await {
+            let (req, mut stream) = resolver.resolve_request().await.expect("resolve");
+            assert_eq!(req.uri().path(), "/rr-h3-probe");
+            let response = Response::builder().status(StatusCode::OK).body(()).unwrap();
+            stream.send_response(response).await.expect("resp");
+            stream
+                .send_data(Bytes::from_static(H3_BODY))
+                .await
+                .expect("body");
+            stream.finish().await.expect("finish");
+            handled += 1;
+        }
+        handled
+    });
+
+    let (control, relay) = socks5_udp_associate(socks_port).await;
+    let udp = UdpSocket::bind("127.0.0.1:0").await.expect("client udp");
+    let socks = Arc::new(Socks5UdpSocket {
+        udp,
+        relay,
+        target: DEST_443,
+        _control: control,
+    });
+
+    let mut client_crypto = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    client_crypto.alpn_protocols = vec![b"h3".to_vec()];
+    client_crypto.enable_early_data = true;
+
+    let mut client_endpoint = Endpoint::new_with_abstract_socket(
+        EndpointConfig::default(),
+        None,
+        socks,
+        quinn::default_runtime().expect("tokio runtime"),
+    )
+    .expect("client endpoint");
+    let mut client_transport = quinn::TransportConfig::default();
+    client_transport.initial_mtu(1200);
+    let mut client_config =
+        ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_crypto).unwrap()));
+    client_config.transport_config(Arc::new(client_transport));
+    client_endpoint.set_default_client_config(client_config);
+
+    let conn = client_endpoint
+        .connect(DEST_443, "localhost")
+        .expect("connect")
+        .await
+        .expect("QUIC handshake via Handoff XUDP");
+    assert_eq!(
+        conn.handshake_data()
+            .and_then(|d| d.downcast::<quinn::crypto::rustls::HandshakeData>().ok())
+            .and_then(|d| d.protocol)
+            .unwrap_or_default()
+            .as_slice(),
+        b"h3"
+    );
+
+    let (mut driver, mut send_request) = h3::client::new(h3_quinn::Connection::new(conn))
+        .await
+        .expect("h3 client");
+    let drive = async move { future::poll_fn(|cx| driver.poll_close(cx)).await };
+    let request = async move {
+        for i in 0..3usize {
+            if i == 2 {
+                tokio::time::sleep(Duration::from_millis(750)).await;
+            }
+            let req = Request::builder()
+                .uri("https://localhost/rr-h3-probe")
+                .body(())
+                .unwrap();
+            let mut stream = send_request.send_request(req).await.expect("send_request");
+            stream.finish().await.expect("req finish");
+            let response = stream.recv_response().await.expect("recv_response");
+            assert_eq!(response.status(), StatusCode::OK, "request {i}");
+            let mut body = Vec::new();
+            while let Some(chunk) = stream.recv_data().await.expect("recv_data") {
+                body.extend_from_slice(chunk.chunk());
+            }
+            assert_eq!(body, H3_BODY, "request {i} body");
+        }
+        Ok::<_, ()>(())
+    };
+    let (req_res, _drive_res) = tokio::join!(request, drive);
+    req_res.expect("H3 requests");
+    let handled = server_task.await.expect("server task");
+    assert!(handled >= 3, "origin handled {handled}");
+    assert_eq!(tcp_hits.load(Ordering::SeqCst), 0, "TCP fallback on :443");
+    let peers = origin_peers.lock().unwrap().clone();
+    assert!(
+        peers
+            .iter()
+            .any(|p| p.ip() == IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))),
+        "H3 origin must see LANDING 127.0.0.2 as UDP peer, got {peers:?}"
+    );
+    eprintln!(
+        "genuine_http3_over_handoff_xudp_udp443 PASS (ALPN h3, {handled} requests, peers={peers:?}, no TCP fallback)"
+    );
+    client_endpoint.close(0u32.into(), b"done");
+}
+
+/// Stock Xray Client → LINE → Handoff LANDING → genuine HTTP/3 UDP/443.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires XRAY_BIN + CAP_NET_BIND_SERVICE; Exact-head Native runs with --ignored"]
+async fn stock_xray_client_handoff_genuine_http3_udp443() {
+    require_udp443_capability();
+    let xray = std::env::var_os("XRAY_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            panic!("XRAY_BIN unset; Exact-head Native must export pinned stock Xray")
+        });
+    assert!(xray.is_file(), "XRAY_BIN missing");
+
+    let root = std::env::temp_dir().join(format!("rr-h3-xray-handoff-{}", free_port()));
+    fs::create_dir_all(&root).unwrap();
+    let _guard = DirGuard(root.clone());
+
+    let (cover_port, _cover) = start_openssl_cover(&root);
+    let (reality_private, reality_public) = generate_x25519();
+    let (landing_private, landing_public) = generate_x25519();
+    let user_id = generate("uuid");
+    let short_id = generate("short-id");
+    let psk = generate("psk");
+    let entry_port = free_port();
+    let landing_port = free_port();
+    let socks_port = free_port();
+
+    write(
+        &root.join("landing.json"),
+        &format!(
+            r#"{{
+  "role": "landing",
+  "listeners": [{{ "port": {landing_port}, "ip": "ipv4Only", "ipv4": "127.0.0.2" }}],
+  "landing": {{
+    "protocol": "handoff",
+    "psk": "{psk}",
+    "privateKey": "{landing_private}"
+  }}
+}}
+"#
+        ),
+    );
+    write(
+        &root.join("entry.json"),
+        &format!(
+            r#"{{
+  "role": "entry",
+  "listeners": [{{ "port": {entry_port}, "ipv4": "127.0.0.1" }}],
+  "reality": {{
+    "cover": "localhost:{cover_port}",
+    "privateKey": "{reality_private}",
+    "serverNames": ["localhost"],
+    "coverOptimization": {{ "enabled": false }}
+  }},
+  "users": [{{
+    "id": "{user_id}",
+    "shortIds": ["{short_id}"],
+    "label": "xray-handoff-h3"
+  }}],
+  "outbounds": {{
+    "landing-1": {{
+      "type": "handoff",
+      "address": "127.0.0.2",
+      "port": {landing_port},
+      "psk": "{psk}",
+      "landingPublicKey": "{landing_public}",
+      "warmTcp": false
+    }}
+  }},
+  "routing": {{ "default": "landing-1" }}
+}}
+"#
+        ),
+    );
+    write(
+        &root.join("xray-client.json"),
+        &format!(
+            r#"{{
+  "log": {{ "loglevel": "warning" }},
+  "inbounds": [{{
+    "listen": "127.0.0.1",
+    "port": {socks_port},
+    "protocol": "socks",
+    "settings": {{ "auth": "noauth", "udp": true }}
+  }}],
+  "outbounds": [{{
+    "protocol": "vless",
+    "settings": {{
+      "vnext": [{{
+        "address": "127.0.0.1",
+        "port": {entry_port},
+        "users": [{{
+          "id": "{user_id}",
+          "encryption": "none",
+          "flow": "xtls-rprx-vision-udp443"
+        }}]
+      }}]
+    }},
+    "streamSettings": {{
+      "network": "tcp",
+      "security": "reality",
+      "realitySettings": {{
+        "fingerprint": "chrome",
+        "serverName": "localhost",
+        "publicKey": "{reality_public}",
+        "shortId": "{short_id}",
+        "spiderX": "/"
+      }}
+    }}
+  }}]
+}}
+"#
+        ),
+    );
+
+    let _landing = spawn_logged(
+        "landing",
+        {
+            let mut c = Command::new(bin());
+            c.args(["run", "--config"]).arg(root.join("landing.json"));
+            c
+        },
+        &root.join("landing.log"),
+    );
+    wait_tcp_addr("127.0.0.2", landing_port, Duration::from_secs(20));
+    let _entry = spawn_logged(
+        "entry",
+        {
+            let mut c = Command::new(bin());
+            c.args(["run", "--config"]).arg(root.join("entry.json"));
+            c
+        },
+        &root.join("entry.log"),
+    );
+    wait_tcp(entry_port, Duration::from_secs(20));
+    let _xray = spawn_logged(
+        "xray-client",
+        {
+            let mut c = Command::new(&xray);
+            c.args(["run", "-c"]).arg(root.join("xray-client.json"));
+            c
+        },
+        &root.join("xray-client.log"),
+    );
+    wait_tcp(socks_port, Duration::from_secs(20));
+
+    let tcp_hits = Arc::new(AtomicUsize::new(0));
+    let tcp_hits_bg = tcp_hits.clone();
+    let tcp_watch = TcpListener::bind(DEST_443).expect("TCP watchdog");
+    tcp_watch.set_nonblocking(true).ok();
+    thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while Instant::now() < deadline {
+            if tcp_watch.accept().is_ok() {
+                tcp_hits_bg.fetch_add(1, Ordering::SeqCst);
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    });
+
+    let origin_peers = Arc::new(std::sync::Mutex::new(Vec::<SocketAddr>::new()));
+    let (cert, key, roots) = make_h3_certs();
+    let mut server_crypto = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert.clone()], key.into())
+        .expect("server cert");
+    server_crypto.alpn_protocols = vec![b"h3".to_vec()];
+    let mut server_config =
+        ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto).unwrap()));
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_idle_timeout(Some(Duration::from_secs(60).try_into().unwrap()));
+    transport.initial_mtu(1200);
+    server_config.transport = Arc::new(transport);
+
+    let server_sock = StdUdpSocket::bind(DEST_443).expect("H3 origin UDP/443");
+    let server = Endpoint::new(
+        EndpointConfig::default(),
+        Some(server_config),
+        server_sock,
+        quinn::default_runtime().expect("tokio runtime"),
+    )
+    .expect("server endpoint");
+
+    let peers_bg = origin_peers.clone();
+    let server_task = tokio::spawn(async move {
+        let incoming = server
+            .accept()
+            .await
+            .expect("accept")
+            .await
+            .expect("handshake");
+        peers_bg.lock().unwrap().push(incoming.remote_address());
+        let mut h3 = h3::server::builder()
+            .build(h3_quinn::Connection::new(incoming))
+            .await
+            .expect("h3 server");
+        let mut handled = 0usize;
+        while let Ok(Some(resolver)) = h3.accept().await {
+            let (_req, mut stream) = resolver.resolve_request().await.expect("resolve");
+            let response = Response::builder().status(StatusCode::OK).body(()).unwrap();
+            stream.send_response(response).await.expect("resp");
+            stream
+                .send_data(Bytes::from_static(H3_BODY))
+                .await
+                .expect("body");
+            stream.finish().await.expect("finish");
+            handled += 1;
+        }
+        handled
+    });
+
+    let (control, relay) = socks5_udp_associate(socks_port).await;
+    let udp = UdpSocket::bind("127.0.0.1:0").await.expect("client udp");
+    let socks = Arc::new(Socks5UdpSocket {
+        udp,
+        relay,
+        target: DEST_443,
+        _control: control,
+    });
+
+    let mut client_crypto = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    client_crypto.alpn_protocols = vec![b"h3".to_vec()];
+    client_crypto.enable_early_data = true;
+
+    let mut client_endpoint = Endpoint::new_with_abstract_socket(
+        EndpointConfig::default(),
+        None,
+        socks,
+        quinn::default_runtime().expect("tokio runtime"),
+    )
+    .expect("client endpoint");
+    let mut client_transport = quinn::TransportConfig::default();
+    client_transport.initial_mtu(1200);
+    let mut client_config =
+        ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_crypto).unwrap()));
+    client_config.transport_config(Arc::new(client_transport));
+    client_endpoint.set_default_client_config(client_config);
+
+    let conn = client_endpoint
+        .connect(DEST_443, "localhost")
+        .expect("connect")
+        .await
+        .expect("QUIC handshake via stock Xray → Handoff");
+    let (mut driver, mut send_request) = h3::client::new(h3_quinn::Connection::new(conn))
+        .await
+        .expect("h3 client");
+    let drive = async move { future::poll_fn(|cx| driver.poll_close(cx)).await };
+    let request = async move {
+        let req = Request::builder()
+            .uri("https://localhost/rr-h3-probe")
+            .body(())
+            .unwrap();
+        let mut stream = send_request.send_request(req).await.expect("send_request");
+        stream.finish().await.expect("req finish");
+        let response = stream.recv_response().await.expect("recv_response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = Vec::new();
+        while let Some(chunk) = stream.recv_data().await.expect("recv_data") {
+            body.extend_from_slice(chunk.chunk());
+        }
+        assert_eq!(body, H3_BODY);
+        Ok::<_, ()>(())
+    };
+    let (req_res, _drive_res) = tokio::join!(request, drive);
+    req_res.expect("H3 request");
+    let handled = server_task.await.expect("server task");
+    assert!(handled >= 1, "origin handled {handled}");
+    assert_eq!(tcp_hits.load(Ordering::SeqCst), 0, "TCP fallback on :443");
+    let peers = origin_peers.lock().unwrap().clone();
+    assert!(
+        peers
+            .iter()
+            .any(|p| p.ip() == IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))),
+        "H3 origin must see LANDING 127.0.0.2, got {peers:?}"
+    );
+    eprintln!("stock_xray_client_handoff_genuine_http3_udp443 PASS peers={peers:?}");
     client_endpoint.close(0u32.into(), b"done");
 }

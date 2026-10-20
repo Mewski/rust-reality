@@ -392,20 +392,26 @@ pub struct XudpDirectAssociation {
 
 impl XudpDirectAssociation {
     /// Bind an ephemeral UDP socket and remember the first destination.
+    ///
+    /// When `bind_ip` is set (Handoff/NXR LANDING), the UDP socket is bound to
+    /// that address so peers observe LANDING's IP on multi-address hosts
+    /// (e.g. LANDING on `127.0.0.2`). Direct egress passes `None` (wildcard).
     pub async fn open(
         destination: &Destination,
         global_id: Option<XudpGlobalId>,
         owner: [u8; 16],
         globals: &XudpGlobalMap,
         now: Instant,
+        bind_ip: Option<std::net::IpAddr>,
     ) -> Result<Self, XudpSessionError> {
         let addr = destination_to_socket_addr(destination)?;
         if let Some(id) = global_id {
             globals.activate(id, owner, now)?;
         }
-        let bind = match addr {
-            SocketAddr::V4(_) => SocketAddr::from(([0, 0, 0, 0], 0)),
-            SocketAddr::V6(_) => SocketAddr::from(([0u16; 8], 0)),
+        let bind = match (bind_ip, addr) {
+            (Some(ip), _) => SocketAddr::new(ip, 0),
+            (None, SocketAddr::V4(_)) => SocketAddr::from(([0, 0, 0, 0], 0)),
+            (None, SocketAddr::V6(_)) => SocketAddr::from(([0u16; 8], 0)),
         };
         let socket = UdpSocket::bind(bind).await.map_err(XudpSessionError::Io)?;
         Ok(Self {
@@ -868,9 +874,10 @@ mod tests {
         let dest = socket_addr_to_destination(echo_addr);
         let globals = XudpGlobalMap::new();
         let now = Instant::now();
-        let mut assoc = XudpDirectAssociation::open(&dest, Some([9; 8]), [9; 16], &globals, now)
-            .await
-            .unwrap();
+        let mut assoc =
+            XudpDirectAssociation::open(&dest, Some([9; 8]), [9; 16], &globals, now, None)
+                .await
+                .unwrap();
 
         let packet = {
             let mut wire = Vec::new();
@@ -908,9 +915,10 @@ mod tests {
             .unwrap();
         let dest = socket_addr_to_destination(echo.local_addr().unwrap());
         let globals = XudpGlobalMap::new();
-        let mut assoc = XudpDirectAssociation::open(&dest, None, [2; 16], &globals, Instant::now())
-            .await
-            .unwrap();
+        let mut assoc =
+            XudpDirectAssociation::open(&dest, None, [2; 16], &globals, Instant::now(), None)
+                .await
+                .unwrap();
         let blocked = Destination::new(Address::Ipv4(Ipv4Addr::new(10, 0, 0, 1)), 9);
         let packet = {
             let mut wire = Vec::new();
@@ -971,7 +979,7 @@ mod tests {
         let globals = XudpGlobalMap::new();
         let now = Instant::now();
         let gid = [7_u8; 8];
-        let assoc = XudpDirectAssociation::open(&dest, Some(gid), [7; 16], &globals, now)
+        let assoc = XudpDirectAssociation::open(&dest, Some(gid), [7; 16], &globals, now, None)
             .await
             .unwrap();
         assert_eq!(globals.len(), 1);
@@ -979,7 +987,7 @@ mod tests {
         assoc.close(&globals, now);
         globals.purge(now + XUDP_ASSOCIATION_IDLE + Duration::from_secs(1));
         assert_eq!(globals.len(), 0);
-        let again = XudpDirectAssociation::open(&dest, Some(gid), [7; 16], &globals, now)
+        let again = XudpDirectAssociation::open(&dest, Some(gid), [7; 16], &globals, now, None)
             .await
             .unwrap();
         assert_eq!(globals.len(), 1);

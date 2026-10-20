@@ -129,20 +129,33 @@ fn openssl_bin() -> PathBuf {
 }
 
 fn start_openssl_cover(root: &Path) -> (u16, KillOnDrop) {
+    fs::create_dir_all(root).unwrap_or_else(|e| panic!("mkdir {}: {e}", root.display()));
     let cover_port = free_port();
     let key = root.join("cover.key");
     let crt = root.join("cover.crt");
-    let status = Command::new(openssl_bin())
+    let output = Command::new(openssl_bin())
         .args(["req", "-x509", "-newkey", "rsa:2048", "-keyout"])
         .arg(&key)
         .arg("-out")
         .arg(&crt)
-        .args(["-days", "1", "-nodes", "-subj", "/CN=localhost"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .args([
+            "-days",
+            "1",
+            "-nodes",
+            "-subj",
+            "/CN=localhost",
+            "-addext",
+            "subjectAltName=DNS:localhost",
+        ])
+        .output()
         .expect("openssl req");
-    assert!(status.success(), "openssl cert failed");
+    assert!(
+        output.status.success(),
+        "openssl cert failed status={:?} stderr={} stdout={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
     let cover = spawn_logged(
         "cover",
         {
@@ -630,6 +643,7 @@ fn stock_xray_client_nxr_udp_echo_landing_is_sender() {
     let xray = require_stock_xray_bin();
     let root = std::env::temp_dir().join(format!("rr-nxr-xray-{}", free_port()));
     let _guard = DirGuard(root.clone());
+    fs::create_dir_all(&root).expect("mkdir stock-xray-nxr root");
     // Start LINE+LANDING without rust client; stock Xray is the client.
     let (cover_port, _cover) = start_openssl_cover(&root);
     let (private_key, public_key) = generate_x25519();
