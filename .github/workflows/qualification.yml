@@ -382,28 +382,12 @@ jobs:
           fi
           sudo apt-get install -y --no-install-recommends libcap2-bin >/dev/null
           export RR_REQUIRE_UDP443=1
-          # Prior UDP/443 gates can leave :443 busy for a beat (echo/watchdog
-          # threads, Quinn endpoint teardown). Reclaim before binding again —
-          # silent skip is forbidden; we fail closed if still busy after wait.
+          # Prior UDP/443 gates can leave :443 busy briefly. Reclaim before
+          # binding again — silent skip is forbidden; fail closed if still busy.
           ensure_udp443_free() {
             local deadline=$((SECONDS + 30))
             while (( SECONDS < deadline )); do
-              if python3 - <<'PY'
-import socket, sys
-ok = True
-for kind in (socket.SOCK_DGRAM, socket.SOCK_STREAM):
-    s = socket.socket(socket.AF_INET, kind)
-    try:
-        s.bind(("127.0.0.1", 443))
-    except OSError as e:
-        print(e, flush=True)
-        ok = False
-        break
-    finally:
-        s.close()
-sys.exit(0 if ok else 1)
-PY
-              then
+              if python3 -c 'import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.bind(("127.0.0.1",443)); s.close(); s=socket.socket(socket.AF_INET,socket.SOCK_STREAM); s.bind(("127.0.0.1",443)); s.close()'; then
                 printf '127.0.0.1:443 free\n'
                 return 0
               fi
@@ -469,28 +453,12 @@ PY
           fi
           sudo apt-get install -y --no-install-recommends libcap2-bin >/dev/null
           export RR_REQUIRE_UDP443=1
-          # Prior UDP/443 gates can leave :443 busy for a beat (echo/watchdog
-          # threads, Quinn endpoint teardown). Reclaim before binding again —
-          # silent skip is forbidden; we fail closed if still busy after wait.
+          # Prior UDP/443 gates can leave :443 busy briefly. Reclaim before
+          # binding again — silent skip is forbidden; fail closed if still busy.
           ensure_udp443_free() {
             local deadline=$((SECONDS + 30))
             while (( SECONDS < deadline )); do
-              if python3 - <<'PY'
-import socket, sys
-ok = True
-for kind in (socket.SOCK_DGRAM, socket.SOCK_STREAM):
-    s = socket.socket(socket.AF_INET, kind)
-    try:
-        s.bind(("127.0.0.1", 443))
-    except OSError as e:
-        print(e, flush=True)
-        ok = False
-        break
-    finally:
-        s.close()
-sys.exit(0 if ok else 1)
-PY
-              then
+              if python3 -c 'import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.bind(("127.0.0.1",443)); s.close(); s=socket.socket(socket.AF_INET,socket.SOCK_STREAM); s.bind(("127.0.0.1",443)); s.close()'; then
                 printf '127.0.0.1:443 free\n'
                 return 0
               fi
