@@ -64,6 +64,7 @@ tests from earlier PRs:
 | NXR UDP E2E (PR3) | rust↔rust and stock Xray Client → LINE → NXR LANDING → UDP echo; LANDING source `127.0.0.2` proof; multi-dest Keep; Block → zero packets; genuine Quinn+h3 UDP/443 via NXR; `allowUdp443` policy |
 | Handoff XUDP continuation (PR4) | Continuation v3 `SessionKind` + policy snapshot; version mismatch fail-closed; KeyUpdate/seq/prefetch preserved; LANDING owns TLS+UDP; LINE thin splice |
 | Multi-dest sealed policy (PR5) | Handoff policy snapshot v2: ordered sealable rules; Block/other deny before default allow; geosite/geoip fail-closed; NXR Keep re-auth on LINE unchanged |
+| Handoff UDP E2E (PR6) | rust↔rust and stock Xray → LINE → Handoff LANDING → UDP echo; LANDING source `127.0.0.2` proof; multi-dest Keep + Block zero packets; genuine Quinn+h3 UDP/443; Native gates |
 
 This is **not** native QUIC transport. QUIC/443 traffic, when permitted, is still
 UDP datagrams inside Vision/XUDP over the existing REALITY LINE.

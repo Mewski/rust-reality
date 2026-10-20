@@ -78,10 +78,16 @@ async fn rewrite_direct_to_block_rejects_and_sends_zero_datagrams() {
 
     let globals = XudpGlobalMap::new();
     let owner = [0x11; 16];
-    let mut assoc =
-        XudpDirectAssociation::open(&allowed_dest, Some([1; 8]), owner, &globals, Instant::now())
-            .await
-            .unwrap();
+    let mut assoc = XudpDirectAssociation::open(
+        &allowed_dest,
+        Some([1; 8]),
+        owner,
+        &globals,
+        Instant::now(),
+        None,
+    )
+    .await
+    .unwrap();
 
     // Opening New to Direct is fine.
     let open = packet_new(&allowed_dest, b"open-ok", Some([1; 8]));
@@ -261,7 +267,7 @@ async fn association_cancel_then_recover_same_global_id() {
     let gid = [0x77_u8; 8];
     let now = Instant::now();
 
-    let assoc = XudpDirectAssociation::open(&dest, Some(gid), owner, &globals, now)
+    let assoc = XudpDirectAssociation::open(&dest, Some(gid), owner, &globals, now, None)
         .await
         .unwrap();
     assert_eq!(globals.len(), 1);
@@ -270,7 +276,7 @@ async fn association_cancel_then_recover_same_global_id() {
     globals.purge(now + XUDP_ASSOCIATION_IDLE + Duration::from_secs(1));
     assert_eq!(globals.len(), 0);
 
-    let mut again = XudpDirectAssociation::open(&dest, Some(gid), owner, &globals, now)
+    let mut again = XudpDirectAssociation::open(&dest, Some(gid), owner, &globals, now, None)
         .await
         .unwrap();
     let open = packet_new(&dest, b"recovered", Some(gid));
@@ -325,9 +331,10 @@ async fn fail_detection_demo_unauthorized_rewrite_gate() {
         .unwrap();
     let dest = dest_ip([127, 0, 0, 1], echo.local_addr().unwrap().port());
     let globals = XudpGlobalMap::new();
-    let mut assoc = XudpDirectAssociation::open(&dest, None, [0xFD; 16], &globals, Instant::now())
-        .await
-        .unwrap();
+    let mut assoc =
+        XudpDirectAssociation::open(&dest, None, [0xFD; 16], &globals, Instant::now(), None)
+            .await
+            .unwrap();
     let blocked = dest_ip([203, 0, 113, 1], 9); // TEST-NET-3
     let rewrite = packet_keep_rewrite(&blocked, b"should-not-leave");
     assert!(rewrite.destination.is_some());

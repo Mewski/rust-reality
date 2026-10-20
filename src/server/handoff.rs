@@ -578,6 +578,9 @@ impl HandoffLandingHandler {
         if session_kind == SessionKind::Xudp {
             // XUDP: no TCP dial / destination side effect. TLS ownership is on
             // LANDING; UDP sockets open only after transfer+auth succeeded.
+            // Bind UDP to the same local IP the Handoff TCP listener accepted on
+            // so peers observe LANDING (not LINE) on multi-address loopback.
+            let udp_bind_ip = inbound.local_addr().ok().map(|addr| addr.ip());
             let (reader_half, writer_half) = inbound.into_split();
             let (client_reader, client_writer) = resume_application_halves(
                 reader_half,
@@ -593,6 +596,7 @@ impl HandoffLandingHandler {
                 prefetched,
                 policy,
                 self.io_timeout,
+                udp_bind_ip,
             )
             .await
             .map_err(HandoffLandingError::Session)?;

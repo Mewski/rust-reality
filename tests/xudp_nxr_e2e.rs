@@ -13,13 +13,13 @@
 
 use std::{
     fs,
-    io::{Read, Write},
+    io::{ErrorKind, Read, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket as StdUdpSocket},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -129,20 +129,33 @@ fn openssl_bin() -> PathBuf {
 }
 
 fn start_openssl_cover(root: &Path) -> (u16, KillOnDrop) {
+    fs::create_dir_all(root).unwrap_or_else(|e| panic!("mkdir {}: {e}", root.display()));
     let cover_port = free_port();
     let key = root.join("cover.key");
     let crt = root.join("cover.crt");
-    let status = Command::new(openssl_bin())
+    let output = Command::new(openssl_bin())
         .args(["req", "-x509", "-newkey", "rsa:2048", "-keyout"])
         .arg(&key)
         .arg("-out")
         .arg(&crt)
-        .args(["-days", "1", "-nodes", "-subj", "/CN=localhost"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .args([
+            "-days",
+            "1",
+            "-nodes",
+            "-subj",
+            "/CN=localhost",
+            "-addext",
+            "subjectAltName=DNS:localhost",
+        ])
+        .output()
         .expect("openssl req");
-    assert!(status.success(), "openssl cert failed");
+    assert!(
+        output.status.success(),
+        "openssl cert failed status={:?} stderr={} stdout={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
     let cover = spawn_logged(
         "cover",
         {
@@ -386,21 +399,46 @@ struct EchoPeer {
     peers: Arc<Mutex<Vec<SocketAddr>>>,
     hits: Arc<AtomicUsize>,
     port: u16,
-    _join: Option<thread::JoinHandle<()>>,
+    stop: Arc<AtomicBool>,
+    join: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for EchoPeer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+fn bind_udp(addr: SocketAddr) -> StdUdpSocket {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        match StdUdpSocket::bind(addr) {
+            Ok(sock) => return sock,
+            Err(err) if err.kind() == ErrorKind::AddrInUse && Instant::now() < deadline => {
+                eprintln!("bind {addr} still in use ({err}); retrying");
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(err) => panic!("echo bind {addr}: {err}"),
+        }
+    }
 }
 
 fn spawn_udp_echo_on(bind: SocketAddr) -> EchoPeer {
-    let sock = StdUdpSocket::bind(bind).unwrap_or_else(|e| panic!("echo bind {bind}: {e}"));
-    sock.set_read_timeout(Some(Duration::from_millis(200))).ok();
+    let sock = bind_udp(bind);
+    sock.set_read_timeout(Some(Duration::from_millis(100))).ok();
     let port = sock.local_addr().unwrap().port();
     let peers = Arc::new(Mutex::new(Vec::new()));
     let hits = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
     let peers_bg = peers.clone();
     let hits_bg = hits.clone();
+    let stop_bg = stop.clone();
     let join = thread::spawn(move || {
         let mut buf = [0_u8; 65535];
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while Instant::now() < deadline {
+        while !stop_bg.load(Ordering::SeqCst) {
             match sock.recv_from(&mut buf) {
                 Ok((n, from)) => {
                     hits_bg.fetch_add(1, Ordering::SeqCst);
@@ -415,7 +453,8 @@ fn spawn_udp_echo_on(bind: SocketAddr) -> EchoPeer {
         peers,
         hits,
         port,
-        _join: Some(join),
+        stop,
+        join: Some(join),
     }
 }
 
@@ -562,12 +601,7 @@ fn rust_client_nxr_association_teardown_recovers() {
 }
 
 fn require_udp443_capability() {
-    if let Err(err) = StdUdpSocket::bind(DEST_443) {
-        panic!(
-            "cannot bind 127.0.0.1:443 ({err}); Exact-head Native must grant \
-             CAP_NET_BIND_SERVICE (RR_REQUIRE_UDP443=1)"
-        );
-    }
+    let _probe = bind_udp(DEST_443);
 }
 
 #[test]
@@ -579,14 +613,16 @@ fn rust_client_nxr_udp443_allow_policy() {
         let root = std::env::temp_dir().join(format!("rr-nxr-443-deny-{}", free_port()));
         let _guard = DirGuard(root.clone());
         let stack = start_nxr_line_landing(&root, false);
-        let echo = StdUdpSocket::bind(DEST_443).expect("udp/443");
+        let echo = bind_udp(DEST_443);
         echo.set_read_timeout(Some(Duration::from_millis(300))).ok();
         let hits = Arc::new(AtomicUsize::new(0));
         let hits_bg = hits.clone();
         let echo_c = echo.try_clone().unwrap();
-        thread::spawn(move || {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_bg = stop.clone();
+        let join = thread::spawn(move || {
             let mut buf = [0_u8; 2048];
-            for _ in 0..20 {
+            while !stop_bg.load(Ordering::SeqCst) {
                 if echo_c.recv_from(&mut buf).is_ok() {
                     hits_bg.fetch_add(1, Ordering::SeqCst);
                 }
@@ -600,6 +636,9 @@ fn rust_client_nxr_udp443_allow_policy() {
             0,
             "zero packets without allowUdp443"
         );
+        stop.store(true, Ordering::SeqCst);
+        drop(echo);
+        let _ = join.join();
     }
     // Positive: with allowUdp443.
     {
@@ -630,6 +669,7 @@ fn stock_xray_client_nxr_udp_echo_landing_is_sender() {
     let xray = require_stock_xray_bin();
     let root = std::env::temp_dir().join(format!("rr-nxr-xray-{}", free_port()));
     let _guard = DirGuard(root.clone());
+    fs::create_dir_all(&root).expect("mkdir stock-xray-nxr root");
     // Start LINE+LANDING without rust client; stock Xray is the client.
     let (cover_port, _cover) = start_openssl_cover(&root);
     let (private_key, public_key) = generate_x25519();

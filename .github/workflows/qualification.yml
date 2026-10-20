@@ -150,6 +150,26 @@ jobs:
           cargo test --locked --test xudp_nxr_e2e -- --nocapture 2>&1 | tee "$LOG"
           grep -F 'landing_udp_sender_proof' "$LOG" | tee -a "$Q/nxr-xudp-e2e/receipt.txt"
           grep -E 'test result: ok\.' "$LOG" | tee -a "$Q/nxr-xudp-e2e/receipt.txt"
+      - name: Handoff XUDP process E2E (echo, multi-dest, Block)
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          # ADR 0060 / #314 PR6: Vision XUDP → Handoff LANDING (LANDING on 127.0.0.2).
+          mkdir -p "$Q/handoff-xudp-e2e"
+          {
+            printf 'source=%s\nrun=%s\nattempt=%s\n' \
+              "$HEAD_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf 'gate=handoff-xudp-process-e2e\n'
+          } | tee "$Q/handoff-xudp-e2e/identity.txt"
+          if ! command -v openssl >/dev/null 2>&1; then
+            test -n "${OPENSSL_BIN:-}"
+            test -x "$OPENSSL_BIN"
+            export PATH="$(dirname "$OPENSSL_BIN"):$PATH"
+          fi
+          LOG="$Q/handoff-xudp-e2e/cargo-test.log"
+          cargo test --locked --test xudp_handoff_e2e -- --nocapture 2>&1 | tee "$LOG"
+          grep -F 'landing_udp_sender_proof' "$LOG" | tee -a "$Q/handoff-xudp-e2e/receipt.txt"
+          grep -E 'test result: ok\.' "$LOG" | tee -a "$Q/handoff-xudp-e2e/receipt.txt"
       - name: Mandatory stock Xray Client to rust-reality Server XUDP
         timeout-minutes: 10
         run: |
@@ -250,6 +270,44 @@ jobs:
             printf 'verdict=PASS\n'
             grep -E 'test result:|landing_udp_sender_proof' "$LOG" | tail -n20
           } | tee "$Q/stock-xray-nxr-xudp/receipt.txt"
+      - name: Mandatory stock Xray Client to rust-reality Handoff LANDING XUDP
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          test -n "${XRAY_BIN:-}"
+          test -x "$XRAY_BIN"
+          mkdir -p "$Q/stock-xray-handoff-xudp"
+          {
+            printf 'source=%s\nrun=%s\nattempt=%s\n' \
+              "$HEAD_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf 'gate=mandatory-xray-client-to-rust-reality-handoff-xudp\n'
+            printf 'test=stock_xray_client_handoff_udp_echo_landing_is_sender\n'
+          } | tee "$Q/stock-xray-handoff-xudp/identity.txt"
+          if ! command -v openssl >/dev/null 2>&1; then
+            test -n "${OPENSSL_BIN:-}"
+            test -x "$OPENSSL_BIN"
+            export PATH="$(dirname "$OPENSSL_BIN"):$PATH"
+          fi
+          LOG="$Q/stock-xray-handoff-xudp/cargo-test.log"
+          set +e
+          cargo test --locked --test xudp_handoff_e2e \
+            stock_xray_client_handoff_udp_echo_landing_is_sender \
+            -- --exact --nocapture --ignored 2>&1 | tee "$LOG"
+          status=${PIPESTATUS[0]}
+          set -e
+          if grep -E 'skip: XRAY_BIN|XRAY_BIN unset' "$LOG"; then
+            printf '%s\n' 'FAIL: stock Xray Handoff XUDP skipped despite fixture' >&2
+            exit 1
+          fi
+          if ! grep -F 'test stock_xray_client_handoff_udp_echo_landing_is_sender ... ok' "$LOG"; then
+            printf '%s\n' 'FAIL: stock Xray Handoff XUDP test did not report ok' >&2
+            exit 1
+          fi
+          test "$status" -eq 0
+          {
+            printf 'verdict=PASS\n'
+            grep -E 'test result:|landing_udp_sender_proof' "$LOG" | tail -n20
+          } | tee "$Q/stock-xray-handoff-xudp/receipt.txt"
       - name: Mandatory rust-to-rust UDP/443 and genuine HTTP/3 over XUDP
         timeout-minutes: 15
         run: |
@@ -297,7 +355,8 @@ jobs:
           run_one udp443_rejected_without_allow_udp443_before_destination
           run_one genuine_http3_over_xudp_udp443_no_tcp_fallback
           run_one genuine_http3_over_nxr_xudp_udp443_no_tcp_fallback
-          # allowUdp443 via NXR (echo + deny) lives in xudp_nxr_e2e; rebuild with setcap.
+          run_one genuine_http3_over_handoff_xudp_udp443_no_tcp_fallback
+          # allowUdp443 via NXR/Handoff (echo + deny) lives in xudp_*_e2e; rebuild with setcap.
           if grep -E 'skip: cannot bind 127.0.0.1:443' "$LOG"; then
             printf '%s\n' 'FAIL: UDP/443 gate skipped privileged bind' >&2
             exit 1
@@ -323,6 +382,25 @@ jobs:
           fi
           sudo apt-get install -y --no-install-recommends libcap2-bin >/dev/null
           export RR_REQUIRE_UDP443=1
+          # Prior UDP/443 gates can leave :443 busy briefly. Reclaim before
+          # binding again — silent skip is forbidden; fail closed if still busy.
+          # Probe MUST use sudo: unprivileged bind to :443 is EACCES, not EADDRINUSE.
+          ensure_udp443_free() {
+            local deadline=$((SECONDS + 30))
+            while (( SECONDS < deadline )); do
+              if sudo python3 -c 'import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.bind(("127.0.0.1",443)); s.close(); s=socket.socket(socket.AF_INET,socket.SOCK_STREAM); s.bind(("127.0.0.1",443)); s.close()'; then
+                printf '127.0.0.1:443 free\n'
+                return 0
+              fi
+              sudo fuser -k 443/udp 443/tcp 2>/dev/null || true
+              sleep 0.2
+            done
+            printf '%s\n' 'FAIL: 127.0.0.1:443 still busy after reclaim' >&2
+            ss -ulnp | head -n 40 || true
+            ss -tlnp | head -n 40 || true
+            return 1
+          }
+          ensure_udp443_free
           LOG="$Q/nxr-udp443-h3/cargo-test.log"
           : > "$LOG"
           cargo test --locked --test xudp_nxr_e2e --no-run
@@ -359,6 +437,77 @@ jobs:
             printf 'verdict=PASS\n'
             grep -E 'test result:|PASS|peers=' "$LOG" | tail -n40
           } | tee "$Q/nxr-udp443-h3/receipt.txt"
+      - name: Mandatory Handoff UDP/443 policy and stock Xray Handoff HTTP/3
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          mkdir -p "$Q/handoff-udp443-h3"
+          {
+            printf 'source=%s\nrun=%s\nattempt=%s\n' \
+              "$HEAD_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf 'gate=mandatory-handoff-udp443-policy-and-stock-h3\n'
+          } | tee "$Q/handoff-udp443-h3/identity.txt"
+          if ! command -v openssl >/dev/null 2>&1; then
+            test -n "${OPENSSL_BIN:-}"
+            test -x "$OPENSSL_BIN"
+            export PATH="$(dirname "$OPENSSL_BIN"):$PATH"
+          fi
+          sudo apt-get install -y --no-install-recommends libcap2-bin >/dev/null
+          export RR_REQUIRE_UDP443=1
+          # Prior UDP/443 gates can leave :443 busy briefly. Reclaim before
+          # binding again — silent skip is forbidden; fail closed if still busy.
+          # Probe MUST use sudo: unprivileged bind to :443 is EACCES, not EADDRINUSE.
+          ensure_udp443_free() {
+            local deadline=$((SECONDS + 30))
+            while (( SECONDS < deadline )); do
+              if sudo python3 -c 'import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.bind(("127.0.0.1",443)); s.close(); s=socket.socket(socket.AF_INET,socket.SOCK_STREAM); s.bind(("127.0.0.1",443)); s.close()'; then
+                printf '127.0.0.1:443 free\n'
+                return 0
+              fi
+              sudo fuser -k 443/udp 443/tcp 2>/dev/null || true
+              sleep 0.2
+            done
+            printf '%s\n' 'FAIL: 127.0.0.1:443 still busy after reclaim' >&2
+            ss -ulnp | head -n 40 || true
+            ss -tlnp | head -n 40 || true
+            return 1
+          }
+          ensure_udp443_free
+          LOG="$Q/handoff-udp443-h3/cargo-test.log"
+          : > "$LOG"
+          cargo test --locked --test xudp_handoff_e2e --no-run
+          mapfile -t BINS < <(find target/debug/deps -maxdepth 1 -type f -name 'xudp_handoff_e2e-*' ! -name '*.d' | sort)
+          test "${#BINS[@]}" -ge 1
+          BIN="${BINS[-1]}"
+          sudo setcap 'cap_net_bind_service=+ep' "$BIN"
+          set +e
+          "$BIN" --exact rust_client_handoff_udp443_allow_policy --nocapture --ignored 2>&1 | tee -a "$LOG"
+          status=${PIPESTATUS[0]}
+          set -e
+          if ! grep -F 'test rust_client_handoff_udp443_allow_policy ... ok' "$LOG"; then
+            printf '%s\n' 'FAIL: Handoff allowUdp443 policy test did not report ok' >&2
+            exit 1
+          fi
+          test "$status" -eq 0
+          cargo test --locked --test quic_h3_udp443_e2e --no-run
+          mapfile -t HBINS < <(find target/debug/deps -maxdepth 1 -type f -name 'quic_h3_udp443_e2e-*' ! -name '*.d' | sort)
+          HBIN="${HBINS[-1]}"
+          sudo setcap 'cap_net_bind_service=+ep' "$HBIN"
+          test -n "${XRAY_BIN:-}"
+          test -x "$XRAY_BIN"
+          set +e
+          "$HBIN" --exact stock_xray_client_handoff_genuine_http3_udp443 --nocapture --ignored 2>&1 | tee -a "$LOG"
+          status=${PIPESTATUS[0]}
+          set -e
+          if ! grep -F 'test stock_xray_client_handoff_genuine_http3_udp443 ... ok' "$LOG"; then
+            printf '%s\n' 'FAIL: stock Xray Handoff H3 test did not report ok' >&2
+            exit 1
+          fi
+          test "$status" -eq 0
+          {
+            printf 'verdict=PASS\n'
+            grep -E 'test result:|PASS|peers=' "$LOG" | tail -n40
+          } | tee "$Q/handoff-udp443-h3/receipt.txt"
       - name: Mandatory adversarial XUDP lifecycle and routing
         timeout-minutes: 10
         run: |
