@@ -20,7 +20,7 @@ use crate::{
     network::NetworkEnvironment,
     protocol::{
         nxr::{NxrKey, NxrProtocolError, encode_request},
-        nxr_udp::encode_udp_open,
+        nxr_udp::{NxrUdpSessionKey, encode_udp_open, open_authenticated_prefix},
         vless::{Address, Destination},
     },
     runtime::{AdmissionDenied, DirectBarrier},
@@ -281,7 +281,7 @@ impl OutboundRegistry {
             .await
     }
 
-    /// Classifies a routed outbound tag for XUDP eligibility (Direct only).
+    /// Classifies a routed outbound tag for XUDP eligibility.
     pub(crate) fn xudp_route_class(&self, tag: &str) -> crate::server::xudp::XudpRouteClass {
         use crate::server::xudp::XudpRouteClass;
         match self.outbounds.get(tag) {
@@ -290,6 +290,50 @@ impl OutboundRegistry {
             Some(CompiledOutbound::Handoff(_)) => XudpRouteClass::Handoff,
             Some(CompiledOutbound::Block) => XudpRouteClass::Block,
             Some(CompiledOutbound::Socks5(_)) | None => XudpRouteClass::Unsupported,
+        }
+    }
+
+    /// Opens one NXR UDP association carrier toward `destination` (ADR 0060).
+    ///
+    /// Fail-closed: unknown tags, non-NXR outbounds, and Handoff/Direct tags
+    /// return errors — never remapped to Direct UDP sockets.
+    pub(crate) async fn connect_nxr_udp(
+        &self,
+        tag: &str,
+        destination: &Destination,
+        user_id: [u8; 16],
+    ) -> Result<(OutboundConnection, NxrUdpSessionKey), OutboundConnectError> {
+        let outbound = self
+            .outbounds
+            .get(tag)
+            .ok_or_else(|| OutboundConnectError::UnknownTag(tag.to_owned()))?;
+        match outbound {
+            CompiledOutbound::Nxr(Some(settings)) => {
+                let (prepared, session) = dial_nxr_udp_carrier(
+                    settings,
+                    destination,
+                    user_id,
+                    self.connect_timeout,
+                    &self.connector,
+                    &self.fd_budget,
+                )
+                .await?;
+                let (connection, warm_permit) = prepared.into_parts();
+                let (stream, fd_permit) = connection.into_parts();
+                Ok((
+                    OutboundConnection {
+                        stream,
+                        fd_permit,
+                        warm_permit,
+                    },
+                    session,
+                ))
+            }
+            CompiledOutbound::Nxr(None) => Err(OutboundConnectError::NxrOutboundConfig),
+            CompiledOutbound::Handoff(_) => Err(OutboundConnectError::HandoffUnsupported),
+            CompiledOutbound::Direct | CompiledOutbound::Block | CompiledOutbound::Socks5(_) => {
+                Err(OutboundConnectError::UnknownTag(tag.to_owned()))
+            }
         }
     }
 
@@ -895,12 +939,7 @@ fn fresh_nxr_request(
     Ok(request)
 }
 
-/// Builds one UDP-mode NXR open (ADR 0060). Does not dial; used by LINE when
-/// Vision routes XUDP to an NXR outbound (wired in a follow-up PR).
-#[allow(
-    dead_code,
-    reason = "Vision XUDP→NXR open helper; used by connect_nxr_udp / next PR"
-)]
+/// Builds one UDP-mode NXR open (ADR 0060 Option A).
 fn fresh_nxr_udp_request(
     settings: &CompiledNxr,
     destination: &Destination,
@@ -927,21 +966,17 @@ fn fresh_nxr_udp_request(
 
 /// Dials an NXR landing and writes one authenticated UDP-mode open.
 ///
-/// Returns the connected stream ready for length-prefixed NXR UDP frames.
-#[allow(
-    dead_code,
-    reason = "Vision XUDP→NXR session wiring lands in the next PR"
-)]
-async fn connect_nxr_udp(
+/// Returns the TCP carrier plus the session MAC key derived from the open
+/// transcript (ADR 0060 Option A). Warm-pool sockets are TCP-open shaped and
+/// must not be reused for UDP associations.
+async fn dial_nxr_udp_carrier(
     settings: &CompiledNxr,
     destination: &Destination,
     user_id: [u8; 16],
     timeout: Duration,
     connector: &DestinationConnector,
     fd_budget: &FdBudget,
-) -> Result<PreparedConnection, OutboundConnectError> {
-    // Warm-pool sockets are TCP-open shaped today; UDP associations always dial cold
-    // so a pooled TCP open cannot be reused as a UDP association.
+) -> Result<(PreparedConnection, NxrUdpSessionKey), OutboundConnectError> {
     let deadline = Instant::now()
         .checked_add(timeout)
         .ok_or(OutboundConnectError::NxrTimeout)?;
@@ -954,6 +989,12 @@ async fn connect_nxr_udp(
     .map_err(map_nxr_connect_error)?;
     let (mut stream, fd_permit) = connected.into_parts();
     let request = fresh_nxr_udp_request(settings, destination, user_id)?;
+    let prefix = open_authenticated_prefix(&request).ok_or_else(|| {
+        OutboundConnectError::NxrProtocol(NxrProtocolError::from(
+            crate::protocol::nxr_udp::NxrUdpError::Length,
+        ))
+    })?;
+    let session = NxrUdpSessionKey::derive(&settings.key, prefix);
     write_all_counted_before(&mut stream, &request, deadline)
         .await
         .map_err(|error| {
@@ -964,10 +1005,13 @@ async fn connect_nxr_udp(
                 OutboundConnectError::NxrConnect(source)
             }
         })?;
-    Ok(PreparedConnection {
-        connection: AccountedTcpStream::from_parts(stream, fd_permit),
-        warm_permit: None,
-    })
+    Ok((
+        PreparedConnection {
+            connection: AccountedTcpStream::from_parts(stream, fd_permit),
+            warm_permit: None,
+        },
+        session,
+    ))
 }
 
 async fn connect_socks5(

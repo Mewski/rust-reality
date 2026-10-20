@@ -515,7 +515,14 @@ impl NxrLandingHandler {
         session: NxrUdpSessionKey,
     ) -> Result<RelayStats, NxrLandingError> {
         let mut current = socket_addr_for_udp(&initial_destination)?;
-        let udp = UdpSocket::bind(std::net::SocketAddr::from(([0, 0, 0, 0], 0)))
+        // Bind the UDP socket to the same local IP the NXR TCP listener accepted
+        // on so echo peers observe LANDING's address (not LINE's) on loopback
+        // multi-address topologies (e.g. LANDING on 127.0.0.2).
+        let bind = inbound
+            .local_addr()
+            .map(|addr| std::net::SocketAddr::new(addr.ip(), 0))
+            .unwrap_or_else(|_| std::net::SocketAddr::from(([0, 0, 0, 0], 0)));
+        let udp = UdpSocket::bind(bind)
             .await
             .map_err(NxrLandingError::UdpIo)?;
         // Charge one outbound FD unit for the UDP socket for the association life.

@@ -5,12 +5,12 @@
 //! capability-aware egress authorization ([`authorize_xudp_egress`]).
 //!
 //! ADR 0060 / Issue #314: NXR and Handoff are **authorized** route classes (not
-//! silently remapped to Direct). Landward NXR/Handoff UDP I/O is wired in later
-//! PRs; until then the Vision session fails closed after authorization rather
-//! than opening Direct sockets for those classes.
+//! silently remapped to Direct). NXR landward uses framed datagrams over the
+//! existing LINE→LANDING TCP hop ([`XudpNxrAssociation`]). Handoff UDP remains
+//! fail-closed until a later PR — never silently opened as Direct.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     error::Error,
     fmt,
     net::SocketAddr,
@@ -18,12 +18,22 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tokio::net::UdpSocket;
-
-use crate::protocol::vless::{
-    Address, Destination, XudpCodecError, XudpGlobalId, XudpPacket, XudpSessionStatus,
-    decode_xudp_packet, encode_xudp_packet,
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpStream, UdpSocket},
 };
+
+use crate::protocol::{
+    nxr_udp::{
+        DIR_LANDING_TO_LINE, DIR_LINE_TO_LANDING, FRAME_TYPE_CLOSE, FRAME_TYPE_DATAGRAM,
+        NxrUdpError, NxrUdpSeq, NxrUdpSessionKey, drain_frames, encode_frame,
+    },
+    vless::{
+        Address, Destination, XudpCodecError, XudpGlobalId, XudpPacket, XudpSessionStatus,
+        decode_xudp_packet, encode_xudp_packet,
+    },
+};
+use crate::server::outbound::{OutboundPermit, OutboundRegistry};
 
 /// Maximum concurrent GlobalID-keyed associations retained by this process.
 pub const XUDP_MAX_ASSOCIATIONS: usize = 256;
@@ -51,10 +61,10 @@ impl fmt::Display for XudpOutboundUnsupported {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Nxr => formatter.write_str(
-                "XUDP NXR egress is not available on this path (landward NXR UDP not wired, or Direct landward required)",
+                "XUDP NXR egress cannot open Direct landward sockets (use the NXR framed carrier)",
             ),
             Self::Handoff => formatter.write_str(
-                "XUDP Handoff egress is not available on this path (landward Handoff UDP not wired, or Direct landward required)",
+                "XUDP Handoff egress is not available yet (fail-closed; no Direct fallback)",
             ),
             Self::Block => formatter.write_str("XUDP destination is blocked by routing"),
             Self::Other => formatter.write_str(
@@ -81,9 +91,9 @@ pub enum XudpRouteClass {
 /// Authorized XUDP egress owner for a routed destination (ADR 0060).
 ///
 /// Distinct variants are intentional: NXR/Handoff MUST NOT be collapsed into
-/// [`Self::Direct`]. Landward forwarding for NXR/Handoff is implemented in
-/// follow-up PRs; callers that only speak Direct UDP sockets must call
-/// [`require_direct_xudp_landward`] after authorization.
+/// [`Self::Direct`]. Callers that only speak Direct UDP sockets must call
+/// [`require_direct_xudp_landward`]. NXR landward uses [`XudpNxrAssociation`].
+/// Handoff landward remains fail-closed until a later PR.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum XudpEgressCapability {
     /// Local Direct UDP sockets on the entry / LINE process.
@@ -133,6 +143,38 @@ pub fn require_direct_xudp_landward(
     }
 }
 
+/// Returns `Ok(())` only when the NXR framed landward carrier may be opened.
+///
+/// # Errors
+///
+/// Non-NXR capabilities (including Direct and Handoff) fail closed.
+pub fn require_nxr_xudp_landward(
+    capability: XudpEgressCapability,
+) -> Result<(), XudpOutboundUnsupported> {
+    match capability {
+        XudpEgressCapability::Nxr => Ok(()),
+        XudpEgressCapability::Direct => Err(XudpOutboundUnsupported::Other),
+        XudpEgressCapability::Handoff => Err(XudpOutboundUnsupported::Handoff),
+    }
+}
+
+/// Returns `Ok(())` only when Handoff landward UDP is ready (currently never).
+///
+/// Kept for symmetric call sites; always fail-closed until Handoff UDP lands.
+///
+/// # Errors
+///
+/// Always [`XudpOutboundUnsupported::Handoff`] (or Direct/Other mismatch).
+pub fn require_handoff_xudp_landward(
+    capability: XudpEgressCapability,
+) -> Result<(), XudpOutboundUnsupported> {
+    match capability {
+        XudpEgressCapability::Handoff => Err(XudpOutboundUnsupported::Handoff),
+        XudpEgressCapability::Direct => Err(XudpOutboundUnsupported::Other),
+        XudpEgressCapability::Nxr => Err(XudpOutboundUnsupported::Nxr),
+    }
+}
+
 /// Deprecated name for [`require_direct_xudp_landward`] after class→capability.
 ///
 /// Prefer [`authorize_xudp_egress`] + [`require_direct_xudp_landward`]. This
@@ -147,6 +189,12 @@ pub enum XudpSessionError {
     Codec(XudpCodecError),
     Outbound(XudpOutboundUnsupported),
     Io(std::io::Error),
+    /// LINE→LANDING NXR UDP carrier failed to dial or authenticate.
+    NxrConnect(crate::server::outbound::OutboundConnectError),
+    /// NXR UDP frame codec / MAC / sequence error on the LINE carrier.
+    NxrCarrier(NxrUdpError),
+    /// Mid-association Keep rewrite changed egress capability (no silent remapping).
+    EgressCapabilityChanged,
     AssociationLimit,
     FdBudgetExhausted,
     MissingNewDestination,
@@ -166,6 +214,10 @@ impl fmt::Display for XudpSessionError {
             Self::Codec(error) => write!(formatter, "XUDP framing error: {error}"),
             Self::Outbound(error) => error.fmt(formatter),
             Self::Io(error) => write!(formatter, "XUDP UDP I/O error: {error}"),
+            Self::NxrConnect(error) => write!(formatter, "XUDP NXR carrier connect error: {error}"),
+            Self::NxrCarrier(error) => write!(formatter, "XUDP NXR carrier frame error: {error}"),
+            Self::EgressCapabilityChanged => formatter
+                .write_str("XUDP Keep rewrite changed egress capability (no silent remapping)"),
             Self::AssociationLimit => write!(
                 formatter,
                 "XUDP association limit ({XUDP_MAX_ASSOCIATIONS}) reached"
@@ -195,6 +247,8 @@ impl Error for XudpSessionError {
             Self::Codec(error) => Some(error),
             Self::Outbound(error) => Some(error),
             Self::Io(error) => Some(error),
+            Self::NxrConnect(error) => Some(error),
+            Self::NxrCarrier(error) => Some(error),
             _ => None,
         }
     }
@@ -455,6 +509,220 @@ fn socket_addr_to_destination(addr: SocketAddr) -> Destination {
     }
 }
 
+/// Bound on unreassembled NXR UDP frame bytes buffered on the LINE carrier.
+const NXR_LINE_FRAME_BUFFER: usize = 256 * 1024;
+
+/// One XUDP association whose landward UDP sockets live on an NXR LANDING node.
+///
+/// LINE retains routing authority: every New/Keep destination is authorized
+/// locally, then integrity-protected inside NXR UDP frames (ADR 0060 Option A).
+pub struct XudpNxrAssociation {
+    stream: TcpStream,
+    _permit: OutboundPermit,
+    session: NxrUdpSessionKey,
+    seq_out: NxrUdpSeq,
+    seq_in: NxrUdpSeq,
+    last_destination: Destination,
+    inbound_buf: Vec<u8>,
+    pending_downlink: VecDeque<crate::protocol::nxr_udp::NxrUdpFrame>,
+    global_id: Option<XudpGlobalId>,
+    last_activity: Instant,
+    uplink_datagrams: u64,
+    downlink_datagrams: u64,
+}
+
+impl XudpNxrAssociation {
+    /// Dial LANDING with a UDP-mode open and register GlobalID affinity.
+    pub async fn open(
+        outbounds: &OutboundRegistry,
+        outbound_tag: &str,
+        destination: &Destination,
+        user_id: [u8; 16],
+        global_id: Option<XudpGlobalId>,
+        globals: &XudpGlobalMap,
+        now: Instant,
+    ) -> Result<Self, XudpSessionError> {
+        if let Some(id) = global_id {
+            globals.activate(id, user_id, now)?;
+        }
+        let (connection, session) = outbounds
+            .connect_nxr_udp(outbound_tag, destination, user_id)
+            .await
+            .map_err(XudpSessionError::NxrConnect)?;
+        let (stream, permit) = connection.into_parts();
+        Ok(Self {
+            stream,
+            _permit: permit,
+            session,
+            seq_out: NxrUdpSeq::new(),
+            seq_in: NxrUdpSeq::new(),
+            last_destination: destination.clone(),
+            inbound_buf: Vec::new(),
+            pending_downlink: VecDeque::new(),
+            global_id,
+            last_activity: now,
+            uplink_datagrams: 0,
+            downlink_datagrams: 0,
+        })
+    }
+
+    pub fn last_activity(&self) -> Instant {
+        self.last_activity
+    }
+
+    pub fn uplink_datagrams(&self) -> u64 {
+        self.uplink_datagrams
+    }
+
+    pub fn downlink_datagrams(&self) -> u64 {
+        self.downlink_datagrams
+    }
+
+    /// Apply one uplink XUDP packet over the NXR framed carrier.
+    pub async fn handle_uplink_packet(
+        &mut self,
+        packet: &XudpPacket,
+        authorized_destination: Option<&Destination>,
+        now: Instant,
+    ) -> Result<(), XudpSessionError> {
+        match packet.status {
+            XudpSessionStatus::End | XudpSessionStatus::KeepAlive => {
+                self.last_activity = now;
+                return Ok(());
+            }
+            XudpSessionStatus::New | XudpSessionStatus::Keep => {}
+        }
+        let mut dest_for_frame = None;
+        if packet.destination.is_some() {
+            let dest = authorized_destination.ok_or(XudpSessionError::UnauthorizedRewrite)?;
+            if dest != &self.last_destination {
+                dest_for_frame = Some(dest.clone());
+                self.last_destination = dest.clone();
+            } else if packet.status == XudpSessionStatus::New {
+                // Open already carried this destination; omit redundant field.
+                dest_for_frame = None;
+            }
+        } else if packet.status == XudpSessionStatus::New {
+            return Err(XudpSessionError::MissingNewDestination);
+        }
+        if !packet.payload.is_empty() || dest_for_frame.is_some() {
+            let seq = self.seq_out.next_out();
+            let mut wire = Vec::new();
+            encode_frame(
+                &self.session,
+                DIR_LINE_TO_LANDING,
+                FRAME_TYPE_DATAGRAM,
+                seq,
+                dest_for_frame.as_ref(),
+                &packet.payload,
+                &mut wire,
+            )
+            .map_err(XudpSessionError::NxrCarrier)?;
+            self.stream
+                .write_all(&wire)
+                .await
+                .map_err(XudpSessionError::Io)?;
+            if !packet.payload.is_empty() {
+                self.uplink_datagrams = self.uplink_datagrams.saturating_add(1);
+            }
+        }
+        self.last_activity = now;
+        Ok(())
+    }
+
+    /// Receive one downlink NXR datagram frame and encode an XUDP Keep frame.
+    pub async fn recv_downlink_frame(
+        &mut self,
+        _buf: &mut [u8],
+        output: &mut Vec<u8>,
+        now: Instant,
+    ) -> Result<usize, XudpSessionError> {
+        loop {
+            if let Some(frame) = self.pending_downlink.pop_front() {
+                return self.finish_downlink_frame(frame, output, now);
+            }
+            while self.inbound_buf.len() >= 4 {
+                let frames =
+                    drain_frames(&mut self.inbound_buf, &self.session, DIR_LANDING_TO_LINE)
+                        .map_err(XudpSessionError::NxrCarrier)?;
+                if frames.is_empty() {
+                    break;
+                }
+                self.pending_downlink.extend(frames);
+                if let Some(frame) = self.pending_downlink.pop_front() {
+                    return self.finish_downlink_frame(frame, output, now);
+                }
+            }
+            let n = self
+                .stream
+                .read_buf(&mut self.inbound_buf)
+                .await
+                .map_err(XudpSessionError::Io)?;
+            if n == 0 {
+                return Err(XudpSessionError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "NXR UDP carrier closed",
+                )));
+            }
+            if self.inbound_buf.len() > NXR_LINE_FRAME_BUFFER {
+                return Err(XudpSessionError::NxrCarrier(NxrUdpError::Length));
+            }
+        }
+    }
+
+    fn finish_downlink_frame(
+        &mut self,
+        frame: crate::protocol::nxr_udp::NxrUdpFrame,
+        output: &mut Vec<u8>,
+        now: Instant,
+    ) -> Result<usize, XudpSessionError> {
+        self.seq_in
+            .accept_in(frame.seq)
+            .map_err(XudpSessionError::NxrCarrier)?;
+        if frame.frame_type == FRAME_TYPE_CLOSE {
+            return Err(XudpSessionError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "NXR UDP association closed by LANDING",
+            )));
+        }
+        if frame.frame_type != FRAME_TYPE_DATAGRAM {
+            return Err(XudpSessionError::NxrCarrier(NxrUdpError::FrameType));
+        }
+        let dest = frame
+            .destination
+            .clone()
+            .unwrap_or_else(|| self.last_destination.clone());
+        self.last_destination = dest.clone();
+        output.clear();
+        encode_xudp_packet(&dest, &frame.payload, false, None, true, output)?;
+        self.downlink_datagrams = self.downlink_datagrams.saturating_add(1);
+        self.last_activity = now;
+        Ok(output.len())
+    }
+
+    pub async fn close(mut self, globals: &XudpGlobalMap, now: Instant) {
+        let seq = self.seq_out.next_out();
+        let mut wire = Vec::new();
+        if encode_frame(
+            &self.session,
+            DIR_LINE_TO_LANDING,
+            FRAME_TYPE_CLOSE,
+            seq,
+            None,
+            &[],
+            &mut wire,
+        )
+        .is_ok()
+        {
+            let _ = self.stream.write_all(&wire).await;
+        }
+        let _ = self.stream.shutdown().await;
+        if let Some(id) = self.global_id {
+            globals.expire(id, now);
+        }
+    }
+}
+
 /// Decode and drain complete XUDP frames from a Vision plaintext buffer.
 pub fn drain_xudp_frames(buffer: &mut Vec<u8>) -> Result<Vec<XudpPacket>, XudpSessionError> {
     let mut packets = Vec::new();
@@ -487,6 +755,23 @@ mod tests {
         assert_eq!(cap, XudpEgressCapability::Direct);
         require_direct_xudp_landward(cap).unwrap();
         require_direct_xudp_route(XudpRouteClass::Direct).unwrap();
+    }
+
+    #[test]
+    fn require_nxr_xudp_landward_only_accepts_nxr() {
+        require_nxr_xudp_landward(XudpEgressCapability::Nxr).unwrap();
+        assert_eq!(
+            require_nxr_xudp_landward(XudpEgressCapability::Direct),
+            Err(XudpOutboundUnsupported::Other)
+        );
+        assert_eq!(
+            require_nxr_xudp_landward(XudpEgressCapability::Handoff),
+            Err(XudpOutboundUnsupported::Handoff)
+        );
+        assert_eq!(
+            require_handoff_xudp_landward(XudpEgressCapability::Handoff),
+            Err(XudpOutboundUnsupported::Handoff)
+        );
     }
 
     #[test]

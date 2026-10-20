@@ -130,6 +130,26 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --locked --test client_socks5_udp_e2e -- --nocapture
+      - name: NXR XUDP process E2E (echo, multi-dest, Block, teardown)
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          # ADR 0060 / #314 PR3: Vision XUDP → NXR LANDING (LANDING on 127.0.0.2).
+          mkdir -p "$Q/nxr-xudp-e2e"
+          {
+            printf 'source=%s\nrun=%s\nattempt=%s\n' \
+              "$HEAD_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf 'gate=nxr-xudp-process-e2e\n'
+          } | tee "$Q/nxr-xudp-e2e/identity.txt"
+          if ! command -v openssl >/dev/null 2>&1; then
+            test -n "${OPENSSL_BIN:-}"
+            test -x "$OPENSSL_BIN"
+            export PATH="$(dirname "$OPENSSL_BIN"):$PATH"
+          fi
+          LOG="$Q/nxr-xudp-e2e/cargo-test.log"
+          cargo test --locked --test xudp_nxr_e2e -- --nocapture 2>&1 | tee "$LOG"
+          grep -F 'landing_udp_sender_proof' "$LOG" | tee -a "$Q/nxr-xudp-e2e/receipt.txt"
+          grep -E 'test result: ok\.' "$LOG" | tee -a "$Q/nxr-xudp-e2e/receipt.txt"
       - name: Mandatory stock Xray Client to rust-reality Server XUDP
         timeout-minutes: 10
         run: |
@@ -192,6 +212,44 @@ jobs:
             grep -E 'test result:' "$LOG" | tail -n1
             grep -F 'xudp_udp_rtt_ms' "$LOG" || true
           } | tee "$Q/stock-xray-xudp/receipt.txt"
+      - name: Mandatory stock Xray Client to rust-reality NXR LANDING XUDP
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          test -n "${XRAY_BIN:-}"
+          test -x "$XRAY_BIN"
+          mkdir -p "$Q/stock-xray-nxr-xudp"
+          {
+            printf 'source=%s\nrun=%s\nattempt=%s\n' \
+              "$HEAD_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf 'gate=mandatory-xray-client-to-rust-reality-nxr-xudp\n'
+            printf 'test=stock_xray_client_nxr_udp_echo_landing_is_sender\n'
+          } | tee "$Q/stock-xray-nxr-xudp/identity.txt"
+          if ! command -v openssl >/dev/null 2>&1; then
+            test -n "${OPENSSL_BIN:-}"
+            test -x "$OPENSSL_BIN"
+            export PATH="$(dirname "$OPENSSL_BIN"):$PATH"
+          fi
+          LOG="$Q/stock-xray-nxr-xudp/cargo-test.log"
+          set +e
+          cargo test --locked --test xudp_nxr_e2e \
+            stock_xray_client_nxr_udp_echo_landing_is_sender \
+            -- --exact --nocapture --ignored 2>&1 | tee "$LOG"
+          status=${PIPESTATUS[0]}
+          set -e
+          if grep -E 'skip: XRAY_BIN|XRAY_BIN unset' "$LOG"; then
+            printf '%s\n' 'FAIL: stock Xray NXR XUDP skipped despite fixture' >&2
+            exit 1
+          fi
+          if ! grep -F 'test stock_xray_client_nxr_udp_echo_landing_is_sender ... ok' "$LOG"; then
+            printf '%s\n' 'FAIL: stock Xray NXR XUDP test did not report ok' >&2
+            exit 1
+          fi
+          test "$status" -eq 0
+          {
+            printf 'verdict=PASS\n'
+            grep -E 'test result:|landing_udp_sender_proof' "$LOG" | tail -n20
+          } | tee "$Q/stock-xray-nxr-xudp/receipt.txt"
       - name: Mandatory rust-to-rust UDP/443 and genuine HTTP/3 over XUDP
         timeout-minutes: 15
         run: |
@@ -238,6 +296,8 @@ jobs:
           run_one udp443_echo_via_xudp_with_allow_udp443
           run_one udp443_rejected_without_allow_udp443_before_destination
           run_one genuine_http3_over_xudp_udp443_no_tcp_fallback
+          run_one genuine_http3_over_nxr_xudp_udp443_no_tcp_fallback
+          # allowUdp443 via NXR (echo + deny) lives in xudp_nxr_e2e; rebuild with setcap.
           if grep -E 'skip: cannot bind 127.0.0.1:443' "$LOG"; then
             printf '%s\n' 'FAIL: UDP/443 gate skipped privileged bind' >&2
             exit 1
@@ -246,6 +306,59 @@ jobs:
             printf 'verdict=PASS\n'
             grep -E 'test result:|genuine_http3|udp443_|ALPN|h3-origin handled' "$LOG" | tail -n40
           } | tee "$Q/quic-h3-udp443/receipt.txt"
+      - name: Mandatory NXR UDP/443 policy and stock Xray NXR HTTP/3
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          mkdir -p "$Q/nxr-udp443-h3"
+          {
+            printf 'source=%s\nrun=%s\nattempt=%s\n' \
+              "$HEAD_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf 'gate=mandatory-nxr-udp443-policy-and-stock-h3\n'
+          } | tee "$Q/nxr-udp443-h3/identity.txt"
+          if ! command -v openssl >/dev/null 2>&1; then
+            test -n "${OPENSSL_BIN:-}"
+            test -x "$OPENSSL_BIN"
+            export PATH="$(dirname "$OPENSSL_BIN"):$PATH"
+          fi
+          sudo apt-get install -y --no-install-recommends libcap2-bin >/dev/null
+          export RR_REQUIRE_UDP443=1
+          LOG="$Q/nxr-udp443-h3/cargo-test.log"
+          : > "$LOG"
+          cargo test --locked --test xudp_nxr_e2e --no-run
+          mapfile -t BINS < <(find target/debug/deps -maxdepth 1 -type f -name 'xudp_nxr_e2e-*' ! -name '*.d' | sort)
+          test "${#BINS[@]}" -ge 1
+          BIN="${BINS[-1]}"
+          sudo setcap 'cap_net_bind_service=+ep' "$BIN"
+          set +e
+          "$BIN" --exact rust_client_nxr_udp443_allow_policy --nocapture --ignored 2>&1 | tee -a "$LOG"
+          status=${PIPESTATUS[0]}
+          set -e
+          if ! grep -F 'test rust_client_nxr_udp443_allow_policy ... ok' "$LOG"; then
+            printf '%s\n' 'FAIL: NXR allowUdp443 policy test did not report ok' >&2
+            exit 1
+          fi
+          test "$status" -eq 0
+          # Stock Xray NXR H3 uses the already setcap'd quic_h3 binary from prior step when present.
+          cargo test --locked --test quic_h3_udp443_e2e --no-run
+          mapfile -t HBINS < <(find target/debug/deps -maxdepth 1 -type f -name 'quic_h3_udp443_e2e-*' ! -name '*.d' | sort)
+          HBIN="${HBINS[-1]}"
+          sudo setcap 'cap_net_bind_service=+ep' "$HBIN"
+          test -n "${XRAY_BIN:-}"
+          test -x "$XRAY_BIN"
+          set +e
+          "$HBIN" --exact stock_xray_client_nxr_genuine_http3_udp443 --nocapture --ignored 2>&1 | tee -a "$LOG"
+          status=${PIPESTATUS[0]}
+          set -e
+          if ! grep -F 'test stock_xray_client_nxr_genuine_http3_udp443 ... ok' "$LOG"; then
+            printf '%s\n' 'FAIL: stock Xray NXR H3 test did not report ok' >&2
+            exit 1
+          fi
+          test "$status" -eq 0
+          {
+            printf 'verdict=PASS\n'
+            grep -E 'test result:|PASS|peers=' "$LOG" | tail -n40
+          } | tee "$Q/nxr-udp443-h3/receipt.txt"
       - name: Mandatory adversarial XUDP lifecycle and routing
         timeout-minutes: 10
         run: |

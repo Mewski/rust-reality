@@ -46,9 +46,9 @@ use super::{
     reality::RealityEstablished,
     routing::{AssetMatcher, RouteResolutionError, RoutingCompileError, RoutingTable},
     xudp::{
-        XUDP_ASSOCIATION_IDLE, XudpDirectAssociation, XudpEgressCapability, XudpSessionError,
-        authorize_xudp_egress, drain_xudp_frames, process_xudp_global_map,
-        require_direct_xudp_landward,
+        XUDP_ASSOCIATION_IDLE, XudpDirectAssociation, XudpEgressCapability, XudpNxrAssociation,
+        XudpSessionError, authorize_xudp_egress, drain_xudp_frames, process_xudp_global_map,
+        require_direct_xudp_landward, require_handoff_xudp_landward, require_nxr_xudp_landward,
     },
 };
 use crate::config::node::entry::EntryConfig;
@@ -486,15 +486,22 @@ impl VisionHandler {
     ///
     /// Keep rewrites MUST call this again; a prior decision must not be inherited
     /// when the new destination routes to Block or another outbound. Returns a
-    /// distinct [`XudpEgressCapability`] (Direct / NXR / Handoff) — never remaps
-    /// NXR/Handoff to Direct (ADR 0060).
+    /// distinct [`XudpEgressCapability`] (Direct / NXR / Handoff), the resolved
+    /// destination, and the outbound tag — never remaps NXR/Handoff to Direct
+    /// (ADR 0060).
     pub(crate) async fn authorize_xudp_destination(
         &self,
         user_id: UserId,
         inbound_tag: &str,
         dest: &crate::protocol::vless::Destination,
-    ) -> Result<(XudpEgressCapability, crate::protocol::vless::Destination), VisionSessionError>
-    {
+    ) -> Result<
+        (
+            XudpEgressCapability,
+            crate::protocol::vless::Destination,
+            String,
+        ),
+        VisionSessionError,
+    > {
         let route = self
             .routing
             .select_with_dns(
@@ -506,9 +513,9 @@ impl VisionHandler {
             )
             .await
             .map_err(VisionSessionError::Route)?;
-        let capability =
-            authorize_xudp_egress(self.outbounds.xudp_route_class(route.decision().outbound()))
-                .map_err(|error| VisionSessionError::Xudp(XudpSessionError::Outbound(error)))?;
+        let outbound_tag = route.decision().outbound().to_owned();
+        let capability = authorize_xudp_egress(self.outbounds.xudp_route_class(&outbound_tag))
+            .map_err(|error| VisionSessionError::Xudp(XudpSessionError::Outbound(error)))?;
         let resolved = if let Some(ip) = route.resolved_ips().first().copied() {
             match ip {
                 IpAddr::V4(v4) => crate::protocol::vless::Destination::new(
@@ -523,16 +530,15 @@ impl VisionHandler {
         } else {
             dest.clone()
         };
-        Ok((capability, resolved))
+        Ok((capability, resolved, outbound_tag))
     }
 
     /// Serves one REALITY-authenticated Vision **XUDP** (Mux) session.
     ///
-    /// XUDP frames ride inside Vision padding. Routing may authorize Direct,
-    /// NXR, or Handoff (ADR 0060). This handler only opens **Direct** landward
-    /// UDP sockets today; NXR/Handoff fail closed after authorization until
-    /// landward forwarding lands (no silent Direct fallback). Block/unknown
-    /// remain fail-closed at authorization.
+    /// XUDP frames ride inside Vision padding. Routing may authorize Direct or
+    /// NXR (ADR 0060 Option A framed carrier). Handoff remains fail-closed.
+    /// Keep rewrites re-authorize; capability changes and Block fail closed
+    /// with zero landward packets (no silent Direct fallback).
     async fn handle_xudp(
         &self,
         mut client_reader: TlsApplicationReader<OwnedReadHalf>,
@@ -548,7 +554,6 @@ impl VisionHandler {
         let mut decoder = VisionDecoder::new(user_id);
         let mut encoder = VisionEncoder::new(user_id).map_err(VisionSessionError::VisionEncode)?;
 
-        // VLESS response + opening Vision Continue (empty), matching TCP downlink preamble.
         let response_header = [VERSION, 0];
         let preamble = encoder
             .plan(0, VisionCommand::Continue, true)
@@ -593,8 +598,7 @@ impl VisionHandler {
         let mut packets =
             drain_xudp_frames(&mut vision_plaintext).map_err(VisionSessionError::Xudp)?;
 
-        // Read more TLS/Vision until the first New frame with a destination appears.
-        let mut association = None;
+        let mut association = None::<XudpLandwardAssociation>;
         let globals = process_xudp_global_map();
         let mut uplink_bytes = 0_u64;
         let mut downlink_bytes = 0_u64;
@@ -602,37 +606,93 @@ impl VisionHandler {
         loop {
             for packet in packets.drain(..) {
                 let authorized = if let Some(dest) = packet.destination.as_ref() {
-                    let (capability, resolved) = self
+                    let (capability, resolved, outbound_tag) = self
                         .authorize_xudp_destination(user_id, inbound_tag, dest)
                         .await?;
-                    // PR1: Direct landward only; NXR/Handoff authorized but not wired.
-                    require_direct_xudp_landward(capability).map_err(|error| {
-                        VisionSessionError::Xudp(XudpSessionError::Outbound(error))
-                    })?;
-                    Some(resolved)
+                    Some((capability, resolved, outbound_tag))
                 } else {
                     None
                 };
                 if association.is_none() {
-                    let bind_dest = authorized.clone().ok_or(VisionSessionError::Xudp(
-                        XudpSessionError::MissingNewDestination,
-                    ))?;
+                    let (capability, bind_dest, outbound_tag) = authorized.clone().ok_or(
+                        VisionSessionError::Xudp(XudpSessionError::MissingNewDestination),
+                    )?;
                     let now = std::time::Instant::now();
-                    let assoc = XudpDirectAssociation::open(
-                        &bind_dest,
-                        packet.global_id,
-                        *user_id.as_bytes(),
-                        globals,
-                        now,
-                    )
-                    .await
-                    .map_err(VisionSessionError::Xudp)?;
+                    let assoc = match capability {
+                        XudpEgressCapability::Direct => {
+                            require_direct_xudp_landward(capability).map_err(|error| {
+                                VisionSessionError::Xudp(XudpSessionError::Outbound(error))
+                            })?;
+                            XudpLandwardAssociation::Direct(
+                                XudpDirectAssociation::open(
+                                    &bind_dest,
+                                    packet.global_id,
+                                    *user_id.as_bytes(),
+                                    globals,
+                                    now,
+                                )
+                                .await
+                                .map_err(VisionSessionError::Xudp)?,
+                            )
+                        }
+                        XudpEgressCapability::Nxr => {
+                            require_nxr_xudp_landward(capability).map_err(|error| {
+                                VisionSessionError::Xudp(XudpSessionError::Outbound(error))
+                            })?;
+                            XudpLandwardAssociation::Nxr(
+                                XudpNxrAssociation::open(
+                                    &self.outbounds,
+                                    &outbound_tag,
+                                    &bind_dest,
+                                    *user_id.as_bytes(),
+                                    packet.global_id,
+                                    globals,
+                                    now,
+                                )
+                                .await
+                                .map_err(VisionSessionError::Xudp)?,
+                            )
+                        }
+                        XudpEgressCapability::Handoff => {
+                            require_handoff_xudp_landward(capability).map_err(|error| {
+                                VisionSessionError::Xudp(XudpSessionError::Outbound(error))
+                            })?;
+                            unreachable!("Handoff landward remains fail-closed")
+                        }
+                    };
                     association = Some(assoc);
                 }
                 if let Some(assoc) = association.as_mut() {
                     let now = std::time::Instant::now();
+                    let resolved = if let Some((capability, resolved, _)) = authorized.as_ref() {
+                        if *capability != assoc.capability() {
+                            return Err(VisionSessionError::Xudp(
+                                XudpSessionError::EgressCapabilityChanged,
+                            ));
+                        }
+                        match capability {
+                            XudpEgressCapability::Direct => {
+                                require_direct_xudp_landward(*capability).map_err(|error| {
+                                    VisionSessionError::Xudp(XudpSessionError::Outbound(error))
+                                })?;
+                            }
+                            XudpEgressCapability::Nxr => {
+                                require_nxr_xudp_landward(*capability).map_err(|error| {
+                                    VisionSessionError::Xudp(XudpSessionError::Outbound(error))
+                                })?;
+                            }
+                            XudpEgressCapability::Handoff => {
+                                require_handoff_xudp_landward(*capability).map_err(|error| {
+                                    VisionSessionError::Xudp(XudpSessionError::Outbound(error))
+                                })?;
+                            }
+                        }
+                        Some(resolved.clone())
+                    } else {
+                        None
+                    };
                     assoc
-                        .handle_uplink_packet(&packet, authorized.as_ref(), now)
+                        .handle_uplink_packet(&packet, resolved.as_ref(), now)
                         .await
                         .map_err(VisionSessionError::Xudp)?;
                     uplink_bytes = uplink_bytes.saturating_add(packet.payload.len() as u64);
@@ -643,7 +703,6 @@ impl VisionHandler {
                 break;
             }
 
-            // Need more Vision plaintext for the opening New frame.
             let record = client_reader
                 .read_application(self.request_timeout)
                 .await
@@ -671,7 +730,6 @@ impl VisionHandler {
         let mut vision_frame = Vec::new();
         let idle = XUDP_ASSOCIATION_IDLE;
 
-        // Bidirectional Vision↔UDP loop until idle timeout or peer close.
         loop {
             tokio::select! {
                 biased;
@@ -694,24 +752,54 @@ impl VisionHandler {
                                 .map_err(VisionSessionError::Xudp)?;
                             let now = std::time::Instant::now();
                             for packet in more {
-                                let authorized = if let Some(dest) = packet.destination.as_ref()
-                                {
-                                    let (capability, resolved) = self
+                                let resolved = if let Some(dest) = packet.destination.as_ref() {
+                                    let (capability, resolved, _) = self
                                         .authorize_xudp_destination(
                                             user_id,
                                             inbound_tag,
                                             dest,
                                         )
                                         .await?;
-                                    require_direct_xudp_landward(capability).map_err(|error| {
-                                        VisionSessionError::Xudp(XudpSessionError::Outbound(error))
-                                    })?;
+                                    if capability != assoc.capability() {
+                                        return Err(VisionSessionError::Xudp(
+                                            XudpSessionError::EgressCapabilityChanged,
+                                        ));
+                                    }
+                                    match capability {
+                                        XudpEgressCapability::Direct => {
+                                            require_direct_xudp_landward(capability).map_err(
+                                                |error| {
+                                                    VisionSessionError::Xudp(
+                                                        XudpSessionError::Outbound(error),
+                                                    )
+                                                },
+                                            )?;
+                                        }
+                                        XudpEgressCapability::Nxr => {
+                                            require_nxr_xudp_landward(capability).map_err(
+                                                |error| {
+                                                    VisionSessionError::Xudp(
+                                                        XudpSessionError::Outbound(error),
+                                                    )
+                                                },
+                                            )?;
+                                        }
+                                        XudpEgressCapability::Handoff => {
+                                            require_handoff_xudp_landward(capability).map_err(
+                                                |error| {
+                                                    VisionSessionError::Xudp(
+                                                        XudpSessionError::Outbound(error),
+                                                    )
+                                                },
+                                            )?;
+                                        }
+                                    }
                                     Some(resolved)
                                 } else {
                                     None
                                 };
                                 assoc
-                                    .handle_uplink_packet(&packet, authorized.as_ref(), now)
+                                    .handle_uplink_packet(&packet, resolved.as_ref(), now)
                                     .await
                                     .map_err(VisionSessionError::Xudp)?;
                                 uplink_bytes =
@@ -747,7 +835,7 @@ impl VisionHandler {
             }
         }
 
-        assoc.close(globals, std::time::Instant::now());
+        assoc.close(globals, std::time::Instant::now()).await;
         let _ = client_writer.shutdown(self.io_timeout).await;
         Ok(VisionRelayStats {
             uplink_bytes,
@@ -2767,6 +2855,60 @@ fn length_u64(length: usize) -> u64 {
     u64::try_from(length).unwrap_or(u64::MAX)
 }
 
+/// Landward owner for one XUDP association (Direct local UDP or NXR carrier).
+enum XudpLandwardAssociation {
+    Direct(XudpDirectAssociation),
+    Nxr(XudpNxrAssociation),
+}
+
+impl XudpLandwardAssociation {
+    const fn capability(&self) -> XudpEgressCapability {
+        match self {
+            Self::Direct(_) => XudpEgressCapability::Direct,
+            Self::Nxr(_) => XudpEgressCapability::Nxr,
+        }
+    }
+
+    async fn handle_uplink_packet(
+        &mut self,
+        packet: &crate::protocol::vless::XudpPacket,
+        authorized_destination: Option<&crate::protocol::vless::Destination>,
+        now: std::time::Instant,
+    ) -> Result<(), XudpSessionError> {
+        match self {
+            Self::Direct(assoc) => {
+                assoc
+                    .handle_uplink_packet(packet, authorized_destination, now)
+                    .await
+            }
+            Self::Nxr(assoc) => {
+                assoc
+                    .handle_uplink_packet(packet, authorized_destination, now)
+                    .await
+            }
+        }
+    }
+
+    async fn recv_downlink_frame(
+        &mut self,
+        buf: &mut [u8],
+        output: &mut Vec<u8>,
+        now: std::time::Instant,
+    ) -> Result<usize, XudpSessionError> {
+        match self {
+            Self::Direct(assoc) => assoc.recv_downlink_frame(buf, output, now).await,
+            Self::Nxr(assoc) => assoc.recv_downlink_frame(buf, output, now).await,
+        }
+    }
+
+    async fn close(self, globals: &crate::server::xudp::XudpGlobalMap, now: std::time::Instant) {
+        match self {
+            Self::Direct(assoc) => assoc.close(globals, now),
+            Self::Nxr(assoc) => assoc.close(globals, now).await,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::runtime::policy::{DirectBarrierPolicy, ResourceGovernorPolicy};
@@ -4636,12 +4778,13 @@ mod tests {
         let green = Destination::new(Address::Ipv4(Ipv4Addr::new(127, 0, 0, 1)), 9);
         let red = Destination::new(Address::Ipv4(Ipv4Addr::new(10, 1, 2, 3)), 9);
 
-        let (capability, authorized) = handler
+        let (capability, authorized, tag) = handler
             .authorize_xudp_destination(USER, "public-reality", &green)
             .await
             .expect("Direct destination must remain GREEN");
         assert_eq!(capability, XudpEgressCapability::Direct);
         assert_eq!(authorized.port(), 9);
+        assert_eq!(tag, "direct");
 
         let err = handler
             .authorize_xudp_destination(USER, "public-reality", &red)
