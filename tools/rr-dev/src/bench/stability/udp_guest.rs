@@ -227,7 +227,9 @@ fn execute(repo: &Path, plan: &Plan, machines: &Machines) -> Result<(), String> 
             Ok(())
         }
         Err(error) => {
-            let _ = write_fail(&plan.output, &error);
+            let tails = log_tails(machines);
+            let _ = fs::write(plan.output.join("diagnostics.txt"), &tails);
+            let _ = write_fail(&plan.output, &format!("{error}\n{tails}"));
             Err(error)
         }
     }
@@ -358,10 +360,40 @@ fn start_origin(machines: &Machines) -> Result<(), String> {
         machines,
         LANDING,
         &format!(
-            "sudo -n bash -c 'cd {HOME} && setsid --fork ip netns exec rr-origin {HOME}/rr-udp-echo --bind {ORIGIN_IP}:{ECHO_PORT} --log {HOME}/echo.log > {HOME}/echo-server.log 2>&1 < /dev/null'"
+            "sudo -n bash -c 'ip netns exec rr-origin {HOME}/rr-udp-echo --bind {ORIGIN_IP}:{ECHO_PORT} --log {HOME}/echo.log >{HOME}/echo-server.log 2>&1 & echo $! >{HOME}/echo.pid'"
         ),
         Duration::from_secs(15),
     )?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let sockets = guest(
+            machines,
+            LANDING,
+            "sudo ip netns exec rr-origin ss -uln",
+            Duration::from_secs(15),
+        )?;
+        if sockets.contains(&format!("{ORIGIN_IP}:{ECHO_PORT}")) || sockets.contains(":9") {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!("echo not listening; {}", log_tails(machines)));
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    let raw = guest(
+        machines,
+        LANDING,
+        &format!(
+            "{HOME}/rr-udp-probe --raw-dest {ORIGIN_IP}:{ECHO_PORT} --timeout-ms 3000 --payload {PAYLOAD}"
+        ),
+        Duration::from_secs(15),
+    )?;
+    if !raw.contains("probe=PASS") {
+        return Err(format!(
+            "landing cannot reach origin: {raw}; {}",
+            log_tails(machines)
+        ));
+    }
     Ok(())
 }
 
@@ -395,17 +427,22 @@ fn held_probe(machines: &Machines, dest: &str) -> Result<(String, String, bool),
         machines,
         LINE,
         &format!(
-            "cd {HOME} && /usr/bin/setsid --fork ./rr-udp-probe --socks 127.0.0.1:{SOCKS_PORT} --dest {dest} --payload {PAYLOAD} --timeout-ms 8000 --hold-ms 20000 > held.out 2> held.err < /dev/null"
+            "cd {HOME} && /usr/bin/setsid --fork ./rr-udp-probe --socks 127.0.0.1:{SOCKS_PORT} --dest {dest} --payload {PAYLOAD} --timeout-ms 20000 --hold-ms 20000 > held.out 2> held.err < /dev/null"
         ),
         Duration::from_secs(15),
     )?;
-    let stdout = poll_stdout(machines, LINE, "held.out", Duration::from_secs(12))?;
+    let stdout = poll_stdout(machines, LINE, "held.out", Duration::from_secs(25))?;
+    if !stdout.starts_with("probe=PASS") {
+        let _ = guest(
+            machines,
+            LINE,
+            "sudo pkill -x rr-udp-probe || true",
+            Duration::from_secs(15),
+        );
+        return Err(format!("success probe {stdout}; {}", log_tails(machines)));
+    }
     let carrier = carrier_established(machines)?;
-    let peer = if stdout.starts_with("probe=PASS") {
-        wait_new_peer(machines, before)?
-    } else {
-        String::new()
-    };
+    let peer = wait_new_peer(machines, before)?;
     let _ = guest(
         machines,
         LINE,
@@ -540,6 +577,7 @@ fn stage_assets(
     fs::write(private.join("client.json"), &configs.client).map_err(|error| error.to_string())?;
     machines.stage(LANDING, &plan.candidate, "rust-reality")?;
     machines.stage(LANDING, &plan.echo, "rr-udp-echo")?;
+    machines.stage(LANDING, &plan.probe, "rr-udp-probe")?;
     machines.stage(LANDING, &private.join("landing.json"), "landing.json")?;
     machines.stage(LINE, &plan.candidate, "rust-reality")?;
     machines.stage(LINE, &plan.probe, "rr-udp-probe")?;
@@ -550,7 +588,7 @@ fn stage_assets(
     guest(
         machines,
         LANDING,
-        &format!("chmod 0755 {HOME}/rust-reality {HOME}/rr-udp-echo"),
+        &format!("chmod 0755 {HOME}/rust-reality {HOME}/rr-udp-echo {HOME}/rr-udp-probe"),
         Duration::from_secs(15),
     )?;
     guest(
@@ -560,6 +598,32 @@ fn stage_assets(
         Duration::from_secs(15),
     )?;
     Ok(())
+}
+
+fn log_tails(machines: &Machines) -> String {
+    let mut out = String::new();
+    for (role, script) in [
+        (
+            LINE,
+            format!(
+                "tail -n 40 {HOME}/cover.log {HOME}/entry.log {HOME}/client.log {HOME}/held.err {HOME}/quick.err 2>/dev/null || true"
+            ),
+        ),
+        (
+            LANDING,
+            format!(
+                "sudo tail -n 40 {HOME}/landing.log {HOME}/echo.log {HOME}/echo-server.log 2>/dev/null || true; echo '---ss---'; sudo ip netns exec rr-origin ss -uln; ss -ltn; ss -tn"
+            ),
+        ),
+    ] {
+        let text =
+            guest(machines, role, &script, Duration::from_secs(15)).unwrap_or_else(|error| error);
+        out.push_str(role);
+        out.push('\n');
+        out.push_str(&text);
+        out.push('\n');
+    }
+    out
 }
 
 struct Configs {
