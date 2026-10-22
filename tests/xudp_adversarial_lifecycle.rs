@@ -9,6 +9,9 @@
 //! - Payload boundaries at stock `XUDP_MAX_PAYLOAD_LEN`.
 //! - Association cancellation (close→expire→purge) and recovery.
 //! - Controlled malformed input and resource pressure.
+//! - Cross-outbound Keep rewrite fence (Direct landward never accepts NXR/Handoff).
+//! - NXR landward frame replay / bad MAC / sequence rejection (ADR 0060 §8).
+//! - Reload-style association retirement does not widen authority mid-life.
 //! - Fail-detection demos for the new gates (would RED if gates were removed).
 //!
 //! Rust Client→Xray Server remains non-gate (ADR 0059 / AGENTS §6).
@@ -18,6 +21,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+use rust_reality::protocol::nxr_udp::{
+    DIR_LINE_TO_LANDING, FRAME_TYPE_DATAGRAM, NxrUdpError, NxrUdpSeq, NxrUdpSessionKey,
+    decode_frame, encode_frame,
+};
 use rust_reality::protocol::vless::{
     Address, Destination, XUDP_MAX_PAYLOAD_LEN, XudpCodecError, XudpSessionStatus,
     decode_xudp_packet, encode_xudp_packet,
@@ -400,4 +407,222 @@ fn keep_without_rewrite_preserves_status() {
     let (pkt, _) = decode_xudp_packet(&wire).unwrap();
     assert_eq!(pkt.status, XudpSessionStatus::Keep);
     assert!(pkt.destination.is_none());
+}
+
+/// PR7 fault matrix: after N open→close→purge cycles the GlobalID map returns
+/// to empty (resource recovery). No silent growth across recovered cycles.
+#[tokio::test]
+async fn association_resource_recovery_after_repeated_fault_cycles() {
+    let echo = UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
+    let dest = dest_ip([127, 0, 0, 1], echo.local_addr().unwrap().port());
+    let globals = XudpGlobalMap::new();
+    let owner = [0xA1; 16];
+    let cycles = 8usize;
+    for i in 0..cycles {
+        let mut gid = [0xA1_u8; 8];
+        gid[7] = i as u8;
+        let now = Instant::now();
+        let mut assoc = XudpDirectAssociation::open(&dest, Some(gid), owner, &globals, now, None)
+            .await
+            .unwrap();
+        assert_eq!(globals.len(), 1, "cycle {i}: one live association");
+        let open = packet_new(&dest, b"pulse", Some(gid));
+        assoc
+            .handle_uplink_packet(&open, Some(&dest), Instant::now())
+            .await
+            .unwrap();
+        let mut buf = [0u8; 8];
+        let (n, _) = echo.recv_from(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"pulse");
+        // Induced "fault": cancel / expire / purge — like LINE reload retiring
+        // an association without leaking the GlobalID slot.
+        assoc.close(&globals, Instant::now());
+        globals.purge(Instant::now() + XUDP_ASSOCIATION_IDLE + Duration::from_secs(1));
+        assert_eq!(globals.len(), 0, "cycle {i}: recovered to empty map");
+    }
+    eprintln!("association_resource_recovery_after_repeated_fault_cycles PASS (cycles={cycles})");
+}
+
+/// PR7: NXR and Handoff remain distinct egress capabilities across a Keep
+/// rewrite authorization fence — never collapse to Direct (no silent fallback).
+#[test]
+fn fault_matrix_nxr_handoff_never_silent_direct_fallback() {
+    for class in [XudpRouteClass::Nxr, XudpRouteClass::Handoff] {
+        let cap = authorize_xudp_egress(class).expect("authorized topology");
+        assert_ne!(
+            cap,
+            XudpEgressCapability::Direct,
+            "{class:?} must not authorize as Direct"
+        );
+        assert!(
+            require_direct_xudp_route(class).is_err(),
+            "{class:?} must fail Direct landward (no silent Direct fallback)"
+        );
+        assert!(
+            matches!(
+                require_direct_xudp_landward(cap),
+                Err(XudpOutboundUnsupported::Nxr | XudpOutboundUnsupported::Handoff)
+            ),
+            "{class:?} Direct landward gate must reject capability {cap:?}"
+        );
+    }
+    // Block / Unsupported stay fail-closed at authorization.
+    for class in [XudpRouteClass::Block, XudpRouteClass::Unsupported] {
+        assert!(authorize_xudp_egress(class).is_err());
+    }
+    eprintln!("fault_matrix_nxr_handoff_never_silent_direct_fallback PASS");
+}
+
+/// PR7: a Keep rewrite authorized as NXR/Handoff must never be landed by the
+/// Direct association path (cross-outbound fence). Prior Direct allow does not
+/// inherit into a different egress class.
+#[tokio::test]
+async fn rewrite_cross_outbound_direct_landward_rejects_nxr_handoff() {
+    let echo = UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
+    let dest = dest_ip([127, 0, 0, 1], echo.local_addr().unwrap().port());
+    let globals = XudpGlobalMap::new();
+    let mut assoc = XudpDirectAssociation::open(
+        &dest,
+        Some([0xC0; 8]),
+        [0xC0; 16],
+        &globals,
+        Instant::now(),
+        None,
+    )
+    .await
+    .unwrap();
+    let open = packet_new(&dest, b"direct-open", Some([0xC0; 8]));
+    let (cap, auth) = authorize_or_reject(XudpRouteClass::Direct, &dest).unwrap();
+    assert_eq!(cap, XudpEgressCapability::Direct);
+    assoc
+        .handle_uplink_packet(&open, Some(&auth), Instant::now())
+        .await
+        .unwrap();
+
+    let alt = dest_ip([127, 0, 0, 1], echo.local_addr().unwrap().port());
+    let rewrite = packet_keep_rewrite(&alt, b"cross-outbound");
+    for class in [XudpRouteClass::Nxr, XudpRouteClass::Handoff] {
+        let capability = authorize_xudp_egress(class).unwrap();
+        assert!(
+            require_direct_xudp_landward(capability).is_err(),
+            "{class:?} must fail Direct landward on Keep rewrite"
+        );
+        // Vision must withhold authorized_destination when landward gate fails.
+        let err = assoc
+            .handle_uplink_packet(&rewrite, None, Instant::now())
+            .await
+            .expect_err("cross-outbound Keep without Direct auth must fail");
+        assert!(
+            matches!(err, XudpSessionError::UnauthorizedRewrite),
+            "{class:?}: expected UnauthorizedRewrite, got {err}"
+        );
+    }
+    assert_eq!(
+        assoc.uplink_datagrams(),
+        1,
+        "only the initial Direct New may have egressed"
+    );
+    assoc.close(&globals, Instant::now());
+    eprintln!("rewrite_cross_outbound_direct_landward_rejects_nxr_handoff PASS");
+}
+
+/// PR7: NXR landward MAC / sequence replay fail closed (ADR 0060 answer 8).
+#[test]
+fn nxr_udp_frame_replay_and_bad_mac_fail_closed() {
+    let session = NxrUdpSessionKey::derive(
+        &rust_reality::protocol::nxr::NxrKey::new([0x42; 32]),
+        b"pr7-adversarial-open-prefix",
+    );
+    let mut wire = Vec::new();
+    encode_frame(
+        &session,
+        DIR_LINE_TO_LANDING,
+        FRAME_TYPE_DATAGRAM,
+        0,
+        None,
+        b"once",
+        &mut wire,
+    )
+    .unwrap();
+    decode_frame(&wire, &session, DIR_LINE_TO_LANDING).unwrap();
+
+    // Bad MAC
+    let mut bad = wire.clone();
+    let last = bad.len() - 1;
+    bad[last] ^= 0xff;
+    assert_eq!(
+        decode_frame(&bad, &session, DIR_LINE_TO_LANDING),
+        Err(NxrUdpError::Authentication)
+    );
+
+    // Sequence replay / reorder
+    let mut inbound = NxrUdpSeq::new();
+    inbound.accept_in(0).unwrap();
+    assert_eq!(inbound.accept_in(0), Err(NxrUdpError::Sequence));
+    assert_eq!(inbound.accept_in(2), Err(NxrUdpError::Sequence));
+    inbound.accept_in(1).unwrap();
+    eprintln!("nxr_udp_frame_replay_and_bad_mac_fail_closed PASS");
+}
+
+/// PR7: reload-style retirement — after close+purge the same GlobalID may be
+/// reclaimed, but an in-flight Direct association never widens to NXR/Handoff
+/// mid-life (ADR 0060 answer 10).
+#[tokio::test]
+async fn reload_retirement_does_not_widen_in_flight_authority() {
+    let echo = UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
+    let dest = dest_ip([127, 0, 0, 1], echo.local_addr().unwrap().port());
+    let globals = XudpGlobalMap::new();
+    let owner = [0xD1; 16];
+    let gid = [0xD1; 8];
+    let mut assoc =
+        XudpDirectAssociation::open(&dest, Some(gid), owner, &globals, Instant::now(), None)
+            .await
+            .unwrap();
+    let open = packet_new(&dest, b"gen1", Some(gid));
+    assoc
+        .handle_uplink_packet(&open, Some(&dest), Instant::now())
+        .await
+        .unwrap();
+
+    // Mid-life "reload" temptation: authorize NXR for a Keep rewrite — Direct
+    // landward must still reject (authority does not widen in-flight).
+    let nxr_cap = authorize_xudp_egress(XudpRouteClass::Nxr).unwrap();
+    assert!(require_direct_xudp_landward(nxr_cap).is_err());
+    let rewrite = packet_keep_rewrite(&dest, b"widen");
+    let err = assoc
+        .handle_uplink_packet(&rewrite, None, Instant::now())
+        .await
+        .expect_err("in-flight Direct must not accept unauthorized Keep");
+    assert!(matches!(err, XudpSessionError::UnauthorizedRewrite));
+
+    // Retirement recovers the GlobalID for a *new* association (new generation).
+    assoc.close(&globals, Instant::now());
+    globals.purge(Instant::now() + XUDP_ASSOCIATION_IDLE + Duration::from_secs(1));
+    assert_eq!(globals.len(), 0);
+    let mut again =
+        XudpDirectAssociation::open(&dest, Some(gid), owner, &globals, Instant::now(), None)
+            .await
+            .unwrap();
+    let reopen = packet_new(&dest, b"gen2", Some(gid));
+    again
+        .handle_uplink_packet(&reopen, Some(&dest), Instant::now())
+        .await
+        .unwrap();
+    let mut buf = [0u8; 8];
+    let (n, _) = echo.recv_from(&mut buf).await.unwrap();
+    // First gen1 may still be in the socket; drain until gen2 or accept either pulse.
+    if &buf[..n] != b"gen2" {
+        let (n2, _) = echo.recv_from(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n2], b"gen2");
+    } else {
+        assert_eq!(&buf[..n], b"gen2");
+    }
+    again.close(&globals, Instant::now());
+    eprintln!("reload_retirement_does_not_widen_in_flight_authority PASS");
 }

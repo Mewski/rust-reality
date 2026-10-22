@@ -16,7 +16,7 @@ See Issue [#254](https://github.com/jacek4yang/rust-reality/issues/254) for pin 
 | Outbound | UDP via XUDP |
 | --- | --- |
 | Direct | Supported (local Direct UDP sockets) |
-| NXR | **Authorized** as a distinct egress capability ([ADR 0060](../../adr/0060-xudp-over-nxr-and-handoff.md)). Landward carrier: authenticated `FLAG_UDP` open + length-prefixed session-MAC frames over LINE→LANDING TCP (`protocol::nxr_udp`). LANDING owns UDP sockets. Vision→NXR session wiring continues in follow-up PRs; until wired, Vision still fails closed after authorization without opening Direct sockets. |
+| NXR | **Authorized** as a distinct egress capability ([ADR 0060](../../adr/0060-xudp-over-nxr-and-handoff.md)). Landward carrier: authenticated `FLAG_UDP` open + length-prefixed session-MAC frames over LINE→LANDING TCP (`protocol::nxr_udp`). LANDING owns UDP sockets. Vision→NXR session wiring lands datagrams on LANDING via the framed carrier; Vision fails closed after authorization without opening Direct sockets on LINE. |
 | Handoff | **Authorized** as a distinct egress capability ([ADR 0060](../../adr/0060-xudp-over-nxr-and-handoff.md) Option B). Continuation v3 carries `SessionKind::Xudp` + sealed `HandoffPolicySnapshot` v2 (ordered sealable route rules + default-outbound allow). LINE transfers before any client-visible Vision response; LANDING resumes TLS, owns UDP, frames XUDP, and evaluates Keep rewrites against the snapshot. Geosite/GeoIP/regexp/ext matchers fail closed to initial-only. Same no-silent-Direct rule. |
 | Block | Rejected by routing / authorization as usual |
 | Other (e.g. SOCKS5) | Fail closed (`Unsupported`) |
@@ -140,4 +140,35 @@ characterisation. Exact-head Native may retain the receipt. These numbers are
 **not** Internet throughput, **not** a capacity claim, and **not** a universal
 speedup claim. Optional stock Xray Client→RR samples (when `XRAY_BIN` is set in
 other suites) remain diagnostic; rust-reality Client→Xray Server is never required.
+
+## PR7 six-cell Native matrix
+
+Exact-head Native aggregates six client×topology UDP cells and fails closed on
+a missing receipt or SKIP token:
+
+| Client | Topology | Receipt gate |
+| --- | --- | --- |
+| rust-reality | Direct | `rust-direct-xudp` |
+| rust-reality | NXR | `nxr-xudp-e2e` |
+| rust-reality | Handoff | `handoff-xudp-e2e` |
+| stock Xray | Direct | `stock-xray-xudp` |
+| stock Xray | NXR | `stock-xray-nxr-xudp` |
+| stock Xray | Handoff | `stock-xray-handoff-xudp` |
+
+Adversarial lifecycle covers Keep rewrite security, GlobalID capacity,
+association cancel/recover, repeated fault-cycle resource recovery, NXR frame
+replay/bad-MAC rejection, cross-outbound Keep fences, reload-style retirement
+without mid-life authority widening, and the no-silent-Direct fallback fence
+for NXR/Handoff. TCP Vision client paths are re-exercised after the XUDP gates
+(`tcp-non-regression`).
+
+### QEMU / Frozen UDP acceptance
+
+| Layer | Role |
+| --- | --- |
+| Exact-head Native | Six client×topology UDP cells, adversarial lifecycle, genuine QUIC/H3, and `ulimit -n 256` NXR+Handoff. Runs on the runner. Not a guest kernel. |
+| QEMU guest | Four KVM cells, `nxr`/`handoff` × `ordinary`/`constrained`. Distinct guest kernels. LINE is `line-a` `192.0.2.1`. LANDING is `landing` `192.0.2.2`. The UDP origin lives only in the LANDING netns `198.51.100.2`. Successful datagrams are emitted from the LANDING listener address `192.0.2.2`. LINE cannot bypass LANDING. |
+| Frozen aggregate | Fail-closed on the TCP four-cell VM campaign, the guest UDP four-cell receipts, and Exact-head Native six-cell, adversarial, and constrained receipts for the same SHA. |
+
+Host-only tests are not guest qualification. TCP-only QEMU success is not UDP completion.
 

@@ -25,6 +25,7 @@ pub mod repro;
 pub mod schema;
 pub mod test_receipt;
 pub mod transfer;
+pub mod udp_guest;
 pub mod vm;
 pub mod workload;
 
