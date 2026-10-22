@@ -167,33 +167,43 @@ jobs:
             "$BUNDLE/rr-dev" --repo "$GITHUB_WORKSPACE" bench stability-check \
               --evidence "$BUNDLE/evidence.json" --case "$check" --run-id "$run_id"
           done
-      - name: Require QEMU NXR/Handoff UDP four-cell evidence in campaign
+      - name: Require guest-kernel NXR/Handoff UDP four-cell evidence
         run: |
           set -euo pipefail
-          # PR7 / #314: Frozen aggregate must prove UDP for NXR+Handoff under
-          # ordinary and constrained profiles (not TCP-only VM cells).
-          UDP="$BUNDLE/qemu-udp"
+          UDP="$BUNDLE/qemu-udp-guest"
           test -d "$UDP"
           test -f "$UDP/receipt.txt"
           test -f "$UDP/identity.txt"
-          if grep -Eiq 'skip|ignored as pass|not run' "$UDP/receipt.txt"; then
-            printf '%s\n' 'FAIL: SKIP token in qemu-udp aggregate' >&2
+          if grep -Eiq 'layer=host-process|skip|ignored as pass|not run' "$UDP/receipt.txt"; then
+            printf '%s\n' 'FAIL: host-process or SKIP token in qemu-udp-guest aggregate' >&2
             cat "$UDP/receipt.txt" >&2
             exit 1
           fi
-          if ! grep -Eq 'verdict=PASS' "$UDP/receipt.txt"; then
-            printf '%s\n' 'FAIL: qemu-udp aggregate lacks verdict=PASS' >&2
+          if ! grep -Fxq 'verdict=PASS' "$UDP/receipt.txt"; then
+            printf '%s\n' 'FAIL: qemu-udp-guest aggregate lacks verdict=PASS' >&2
             exit 1
           fi
-          if ! grep -Eq 'cells=4' "$UDP/receipt.txt"; then
-            printf '%s\n' 'FAIL: qemu-udp aggregate must list cells=4' >&2
+          if ! grep -Fxq 'cells=4' "$UDP/receipt.txt"; then
+            printf '%s\n' 'FAIL: qemu-udp-guest aggregate must list cells=4' >&2
             exit 1
           fi
+          required=$'layer=guest-kernel\nverdict=PASS\nudp_peer=198.51.100.1\nbypass=rejected\nblock_dest=rejected\nfault_drop=rejected\nfault_restore=accepted\ndata_nic_udp=dropped'
           for slug in nxr-ordinary handoff-ordinary nxr-constrained handoff-constrained; do
             test -f "$UDP/$slug-receipt.txt"
-            grep -Eq 'verdict=PASS' "$UDP/$slug-receipt.txt"
+            if ! grep -Fxq "source=$HEAD_SHA" "$UDP/$slug-receipt.txt"; then
+              printf '%s\n' "FAIL: $slug source is not $HEAD_SHA" >&2
+              exit 1
+            fi
+            while IFS= read -r line; do
+              test -n "$line" || continue
+              if ! grep -Fxq "$line" "$UDP/$slug-receipt.txt"; then
+                printf '%s\n' "FAIL: $slug missing $line" >&2
+                cat "$UDP/$slug-receipt.txt" >&2
+                exit 1
+              fi
+            done <<< "$required"
           done
-          printf 'frozen-qemu-udp-four-cell verdict=PASS\n'
+          printf 'frozen-qemu-guest-udp-four-cell verdict=PASS\n'
       - name: Bind Exact-head Native XUDP six-cell into Frozen evidence
         timeout-minutes: 10
         run: |
@@ -255,6 +265,26 @@ jobs:
           fi
           cp "$six" "$BUNDLE/native-xudp/six-cell-receipt.txt"
           cp "$adv" "$BUNDLE/native-xudp/adversarial-receipt.txt"
+          constrained="$(find "$BUNDLE/native-xudp" -type f -name receipt.txt | while read -r p; do
+            idf="$(dirname "$p")/identity.txt"
+            if test -f "$idf" && grep -Fq 'gate=xudp-nxr-handoff-constrained-nofile' "$idf"; then
+              echo "$p"; break
+            fi
+            if grep -Fq 'ulimit_nofile=256' "$p"; then
+              echo "$p"; break
+            fi
+          done)"
+          if test -z "$constrained" || test ! -f "$constrained"; then
+            printf '%s\n' 'FAIL: missing Native constrained UDP receipt' >&2
+            exit 1
+          fi
+          grep -Eq 'verdict=PASS' "$constrained"
+          idf="$(dirname "$constrained")/identity.txt"
+          if test -f "$idf"; then
+            grep -Fq 'ulimit_nofile=256' "$idf"
+          else
+            grep -Fq 'ulimit_nofile=256' "$constrained"
+          fi
           printf 'frozen-native-xudp-six-cell verdict=PASS native_run=%s\n' "$run_id"
       - name: Require the complete frozen offline verdict
         run: |

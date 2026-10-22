@@ -6,7 +6,20 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
+default-run = "rr-dev"
+autobins = false
 
+[[bin]]
+name = "rr-dev"
+path = "src/main.rs"
+
+[[bin]]
+name = "rr-udp-probe"
+path = "src/bin/rr-udp-probe.rs"
+
+[[bin]]
+name = "rr-udp-echo"
+path = "src/bin/rr-udp-echo.rs"
 [dependencies]
 clap = { version = "4.6.5", default-features = false, features = ["derive", "error-context", "help", "std", "suggestions", "usage"] }
 # The TLS origin's server side. `ring` is the provider the production crate

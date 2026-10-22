@@ -400,6 +400,8 @@ enum DeployPlanOperation {
 enum BenchCommand {
     /// Execute the fixed stability workload in the owned local KVM fixture.
     StabilityRun(bench::stability::campaign::Plan),
+    /// Prove NXR or Handoff UDP leaves the LANDING guest, not LINE.
+    StabilityUdpGuest(bench::stability::udp_guest::Plan),
     /// Execute and retain a required check for an existing frozen campaign.
     StabilityCheck(bench::stability::qualification::Plan),
     /// Verify and bind one retained native package smoke receipt.
@@ -1621,6 +1623,15 @@ fn run_bench(repo: &Path, command: &BenchCommand) -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        BenchCommand::StabilityUdpGuest(plan) => {
+            match bench::stability::udp_guest::run(repo, plan) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("{error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         BenchCommand::StabilityGuest(plan) => match bench::stability::guest::run(plan) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {

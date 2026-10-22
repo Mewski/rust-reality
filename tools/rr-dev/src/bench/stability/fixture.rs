@@ -222,7 +222,19 @@ impl Machines {
     /// # Errors
     /// Rejects unknown roles and commands containing a NUL byte.
     pub fn ssh(&self, role: &str, argv: &[&str]) -> Result<Tool, String> {
-        self.ssh_channel(role, argv, None)
+        self.ssh_within(role, argv, Duration::from_secs(15))
+    }
+
+    /// Same owned SSH transport as [`Self::ssh`], with a caller deadline.
+    ///
+    /// Guest package installation exceeds the 15-second command budget. This
+    /// does not open a second transport: unknown roles and quoting stay in
+    /// `ssh_channel`.
+    ///
+    /// # Errors
+    /// Rejects unknown roles and commands containing a NUL byte.
+    pub fn ssh_within(&self, role: &str, argv: &[&str], timeout: Duration) -> Result<Tool, String> {
+        self.ssh_channel(role, argv, None, timeout)
     }
 
     fn ssh_channel(
@@ -230,6 +242,7 @@ impl Machines {
         role: &str,
         argv: &[&str],
         socket: Option<&Path>,
+        timeout: Duration,
     ) -> Result<Tool, String> {
         if argv.is_empty() || argv.iter().any(|arg| arg.contains('\0')) {
             return Err("invalid guest argv".to_owned());
@@ -249,7 +262,7 @@ impl Machines {
         }
         Ok(tool
             .args(["rrtest@127.0.0.1".to_owned(), command])
-            .timeout(Duration::from_secs(15)))
+            .timeout(timeout))
     }
 
     fn clock_channel(&self, role: &str, socket: &Path, before: bool) -> Result<Child, String> {
@@ -387,6 +400,10 @@ impl Machines {
     ///
     /// # Errors
     /// Retains command/probe receipts before reporting setup, skew or I/O failure.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the SSH timeout argument lengthened this existing clock probe"
+    )]
     pub fn clock_probe(&self, role: &str, before: bool) -> Result<(), String> {
         use super::{clock, collect};
         let boot = self.verify_guest(role)?.to_owned();
@@ -418,6 +435,7 @@ impl Machines {
                         role,
                         &argv.iter().map(String::as_str).collect::<Vec<_>>(),
                         Some(&socket),
+                        Duration::from_secs(15),
                     )?
                     .probe();
                 let completed = collect::unix_ms()?;
@@ -448,7 +466,12 @@ impl Machines {
         }
         let host_before_unix_ms = collect::unix_ms()?;
         let outcome = self
-            .ssh_channel(role, &["date", "--utc", "+%s%3N"], Some(&socket))?
+            .ssh_channel(
+                role,
+                &["date", "--utc", "+%s%3N"],
+                Some(&socket),
+                Duration::from_secs(15),
+            )?
             .probe();
         let host_after_unix_ms = collect::unix_ms()?;
         if !channel.is_alive() {

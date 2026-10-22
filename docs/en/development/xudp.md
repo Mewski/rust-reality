@@ -162,13 +162,13 @@ without mid-life authority widening, and the no-silent-Direct fallback fence
 for NXR/Handoff. TCP Vision client paths are re-exercised after the XUDP gates
 (`tcp-non-regression`).
 
-### QEMU / Frozen UDP acceptance (PR7)
+### QEMU / Frozen UDP acceptance
 
 | Layer | Role |
 | --- | --- |
-| Exact-head Native | Six client×topology UDP cells + adversarial + H3 (merge authority for functional UDP) |
-| QEMU specialist | Four **TCP** independent-kernel cells (ADR 0036) **plus** four **UDP** process E2E cells: `nxr`/`handoff` × `ordinary`/`constrained` (descriptor-bounded). Guest user-mode NAT is TCP-oriented; UDP gates share the QEMU workflow candidate SHA and pinned fixtures rather than guest SOCKS UDP ASSOCIATE. |
-| Frozen aggregate | Fail-closed on both the TCP four-cell VM campaign **and** the QEMU UDP four-cell receipts, and binds Exact-head Native six-cell + adversarial receipts for the same SHA |
+| Exact-head Native | Six client×topology UDP cells, adversarial lifecycle, genuine QUIC/H3, and `ulimit -n 256` NXR+Handoff. Runs on the runner. Not a guest kernel. |
+| QEMU guest | Four KVM cells, `nxr`/`handoff` × `ordinary`/`constrained`. Distinct guest kernels. LINE is `line-a` `192.0.2.1`. LANDING is `landing` `192.0.2.2`. The UDP origin lives only in the LANDING netns `198.51.100.2`. Successful datagrams are emitted from `198.51.100.1`. LINE cannot bypass LANDING. |
+| Frozen aggregate | Fail-closed on the TCP four-cell VM campaign, the guest UDP four-cell receipts, and Exact-head Native six-cell, adversarial, and constrained receipts for the same SHA. |
 
-Never treat TCP-only QEMU success as UDP completion.
+Host-only tests are not guest qualification. TCP-only QEMU success is not UDP completion.
 
