@@ -146,9 +146,7 @@ pub fn verdict(obs: &Observation) -> Result<(), String> {
     if !obs.fault_drop_probe.starts_with("probe=FAIL") {
         return Err("carrier drop did not reject the probe".to_owned());
     }
-    if !obs.fault_restore_probe.starts_with("probe=PASS")
-        || obs.fault_restore_peer != LANDING_IP
-    {
+    if !obs.fault_restore_probe.starts_with("probe=PASS") || obs.fault_restore_peer != LANDING_IP {
         return Err(format!(
             "restore probe {} peer {}",
             obs.fault_restore_probe, obs.fault_restore_peer
