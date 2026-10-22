@@ -22,7 +22,6 @@ const HOME: &str = "/home/rrtest/rr-stability";
 const LINE_IP: &str = "192.0.2.1";
 const LANDING_IP: &str = "192.0.2.2";
 const ORIGIN_IP: &str = "198.51.100.2";
-const LANDING_EGRESS: &str = "198.51.100.1";
 const LANDING_PORT: u16 = 18_443;
 const ENTRY_PORT: u16 = 18_444;
 const SOCKS_PORT: u16 = 18_445;
@@ -130,7 +129,9 @@ pub fn verdict(obs: &Observation) -> Result<(), String> {
     if !obs.success_probe.starts_with("probe=PASS") {
         return Err(format!("success probe {}", obs.success_probe));
     }
-    if obs.success_peer != LANDING_EGRESS {
+    // LANDING binds egress UDP to its listener address, so the origin peer is
+    // 192.0.2.2, not the veth address used by an unbound probe.
+    if obs.success_peer != LANDING_IP {
         return Err(format!("udp peer {}", obs.success_peer));
     }
     if !obs.carrier_established {
@@ -146,7 +147,7 @@ pub fn verdict(obs: &Observation) -> Result<(), String> {
         return Err("carrier drop did not reject the probe".to_owned());
     }
     if !obs.fault_restore_probe.starts_with("probe=PASS")
-        || obs.fault_restore_peer != LANDING_EGRESS
+        || obs.fault_restore_peer != LANDING_IP
     {
         return Err(format!(
             "restore probe {} peer {}",
@@ -963,7 +964,7 @@ mod tests {
             line_entry_listen: true,
             line_socks_listen: true,
             success_probe: "probe=PASS".to_owned(),
-            success_peer: LANDING_EGRESS.to_owned(),
+            success_peer: LANDING_IP.to_owned(),
             carrier_established: true,
             bypass_probe: "probe=FAIL reason=timeout".to_owned(),
             bypass_echo_unchanged: true,
@@ -971,7 +972,7 @@ mod tests {
             block_echo_unchanged: true,
             fault_drop_probe: "probe=FAIL reason=timeout".to_owned(),
             fault_restore_probe: "probe=PASS".to_owned(),
-            fault_restore_peer: LANDING_EGRESS.to_owned(),
+            fault_restore_peer: LANDING_IP.to_owned(),
             data_nic_udp_dropped: true,
             line_boot_id: "line-boot".to_owned(),
             landing_boot_id: "landing-boot".to_owned(),

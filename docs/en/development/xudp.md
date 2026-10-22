@@ -167,7 +167,7 @@ for NXR/Handoff. TCP Vision client paths are re-exercised after the XUDP gates
 | Layer | Role |
 | --- | --- |
 | Exact-head Native | Six client×topology UDP cells, adversarial lifecycle, genuine QUIC/H3, and `ulimit -n 256` NXR+Handoff. Runs on the runner. Not a guest kernel. |
-| QEMU guest | Four KVM cells, `nxr`/`handoff` × `ordinary`/`constrained`. Distinct guest kernels. LINE is `line-a` `192.0.2.1`. LANDING is `landing` `192.0.2.2`. The UDP origin lives only in the LANDING netns `198.51.100.2`. Successful datagrams are emitted from `198.51.100.1`. LINE cannot bypass LANDING. |
+| QEMU guest | Four KVM cells, `nxr`/`handoff` × `ordinary`/`constrained`. Distinct guest kernels. LINE is `line-a` `192.0.2.1`. LANDING is `landing` `192.0.2.2`. The UDP origin lives only in the LANDING netns `198.51.100.2`. Successful datagrams are emitted from the LANDING listener address `192.0.2.2`. LINE cannot bypass LANDING. |
 | Frozen aggregate | Fail-closed on the TCP four-cell VM campaign, the guest UDP four-cell receipts, and Exact-head Native six-cell, adversarial, and constrained receipts for the same SHA. |
 
 Host-only tests are not guest qualification. TCP-only QEMU success is not UDP completion.

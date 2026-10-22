@@ -187,7 +187,7 @@ jobs:
             printf '%s\n' 'FAIL: qemu-udp-guest aggregate must list cells=4' >&2
             exit 1
           fi
-          required=$'layer=guest-kernel\nverdict=PASS\nudp_peer=198.51.100.1\nbypass=rejected\nblock_dest=rejected\nfault_drop=rejected\nfault_restore=accepted\ndata_nic_udp=dropped'
+          required=$'layer=guest-kernel\nverdict=PASS\nudp_peer=192.0.2.2\nbypass=rejected\nblock_dest=rejected\nfault_drop=rejected\nfault_restore=accepted\ndata_nic_udp=dropped'
           for slug in nxr-ordinary handoff-ordinary nxr-constrained handoff-constrained; do
             test -f "$UDP/$slug-receipt.txt"
             if ! grep -Fxq "source=$HEAD_SHA" "$UDP/$slug-receipt.txt"; then

@@ -640,7 +640,7 @@ jobs:
             printf 'cells=nxr/ordinary,handoff/ordinary,nxr/constrained,handoff/constrained\n'
           } | tee "$OUT/identity.txt"
           : > "$OUT/receipt.txt"
-          required=$'layer=guest-kernel\nverdict=PASS\nudp_peer=198.51.100.1\nbypass=rejected\nblock_dest=rejected\nfault_drop=rejected\nfault_restore=accepted\ndata_nic_udp=dropped'
+          required=$'layer=guest-kernel\nverdict=PASS\nudp_peer=192.0.2.2\nbypass=rejected\nblock_dest=rejected\nfault_drop=rejected\nfault_restore=accepted\ndata_nic_udp=dropped'
           for slug in nxr-ordinary handoff-ordinary nxr-constrained handoff-constrained; do
             receipt="$(find "$RUNNER_TEMP/rr-qemu-udp-guest" -type f -path "*${slug}*" -name receipt.txt | head -n1 || true)"
             if test -z "$receipt" || test ! -f "$receipt"; then
