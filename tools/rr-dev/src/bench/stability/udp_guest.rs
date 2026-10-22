@@ -402,7 +402,7 @@ fn start_cover(machines: &Machines) -> Result<(), String> {
         machines,
         LINE,
         &format!(
-            "cd {HOME} && /usr/bin/openssl s_server -tls1_3 -quiet -accept {COVER_PORT} -cert cover.crt -key cover.key >cover.log 2>&1 </dev/null & echo $! > cover.pid"
+            "sudo -n bash -c 'cd {HOME} && /usr/bin/openssl s_server -tls1_3 -quiet -accept {COVER_PORT} -cert cover.crt -key cover.key >cover.log 2>&1 </dev/null & echo $! > cover.pid'"
         ),
         Duration::from_secs(15),
     )?;
