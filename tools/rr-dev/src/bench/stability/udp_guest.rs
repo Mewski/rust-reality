@@ -402,23 +402,11 @@ fn start_cover(machines: &Machines) -> Result<(), String> {
         machines,
         LINE,
         &format!(
-            "sudo -n bash -c 'cd {HOME} && /usr/bin/openssl s_server -tls1_3 -quiet -accept {COVER_PORT} -cert cover.crt -key cover.key >cover.log 2>&1 </dev/null & echo $! > cover.pid'"
+            "cd {HOME} && OPENSSL_CONF={HOME}/openssl.cnf /usr/bin/setsid --fork {HOME}/openssl s_server -tls1_3 -quiet -accept 127.0.0.1:{COVER_PORT} -cert {HOME}/cover.crt -key {HOME}/cover.key > cover.log 2>&1 < /dev/null"
         ),
         Duration::from_secs(15),
     )?;
-    wait_listen(machines, LINE, &format!(":{COVER_PORT}"))?;
-    let probe = guest(
-        machines,
-        LINE,
-        &format!(
-            "echo | timeout 5 openssl s_client -connect 127.0.0.1:{COVER_PORT} -tls1_3 -brief 2>&1 || true"
-        ),
-        Duration::from_secs(15),
-    )?;
-    if !probe.contains("TLSv1.3") && !probe.contains("CONNECTION ESTABLISHED") {
-        return Err(format!("cover TLS probe failed: {probe}"));
-    }
-    Ok(())
+    wait_listen(machines, LINE, &format!("127.0.0.1:{COVER_PORT}")).map(|_| ())
 }
 
 fn start_product(machines: &Machines, role: &str, config: &str, log: &str) -> Result<(), String> {
@@ -593,6 +581,10 @@ fn stage_assets(
     machines.stage(LANDING, &private.join("landing.json"), "landing.json")?;
     machines.stage(LINE, &plan.candidate, "rust-reality")?;
     machines.stage(LINE, &plan.probe, "rr-udp-probe")?;
+    machines.stage(LINE, &plan.openssl, "openssl")?;
+    let conf = crate::bench::no_ccs::colocated_openssl_conf(&plan.openssl)
+        .ok_or_else(|| format!("openssl.cnf missing beside {}", plan.openssl.display()))?;
+    machines.stage(LINE, &conf, "openssl.cnf")?;
     machines.stage(LINE, &private.join("cover.crt"), "cover.crt")?;
     machines.stage(LINE, &private.join("cover.key"), "cover.key")?;
     machines.stage(LINE, &private.join("entry.json"), "entry.json")?;
@@ -606,7 +598,7 @@ fn stage_assets(
     guest(
         machines,
         LINE,
-        &format!("chmod 0755 {HOME}/rust-reality {HOME}/rr-udp-probe"),
+        &format!("chmod 0755 {HOME}/rust-reality {HOME}/rr-udp-probe {HOME}/openssl"),
         Duration::from_secs(15),
     )?;
     Ok(())
@@ -685,7 +677,7 @@ fn configs(plan: &Plan, private: &Path, secrets: &mut Vec<String>) -> Result<Con
   "role": "entry",
   "listeners": [{{ "port": {ENTRY_PORT}, "ipv4": "127.0.0.1" }}],
   "reality": {{
-    "cover": "localhost:{COVER_PORT}",
+    "cover": "127.0.0.1:{COVER_PORT}",
     "privateKey": "{reality_private}",
     "serverNames": ["localhost"],
     "coverOptimization": {{ "enabled": false }}
@@ -724,7 +716,7 @@ fn configs(plan: &Plan, private: &Path, secrets: &mut Vec<String>) -> Result<Con
   "role": "entry",
   "listeners": [{{ "port": {ENTRY_PORT}, "ipv4": "127.0.0.1" }}],
   "reality": {{
-    "cover": "localhost:{COVER_PORT}",
+    "cover": "127.0.0.1:{COVER_PORT}",
     "privateKey": "{reality_private}",
     "serverNames": ["localhost"],
     "coverOptimization": {{ "enabled": false }}
