@@ -402,11 +402,22 @@ fn start_cover(machines: &Machines) -> Result<(), String> {
         machines,
         LINE,
         &format!(
-            "cd {HOME} && /usr/bin/setsid --fork /usr/bin/openssl s_server -tls1_3 -quiet -accept {COVER_PORT} -cert {HOME}/cover.crt -key {HOME}/cover.key > cover.log 2>&1 < /dev/null"
+            "bash -c 'cd {HOME} && /usr/bin/openssl s_server -tls1_3 -quiet -accept {COVER_PORT} -cert cover.crt -key cover.key >cover.log 2>&1 </dev/null & echo $! > cover.pid'"
         ),
         Duration::from_secs(15),
     )?;
     wait_listen(machines, LINE, &format!(":{COVER_PORT}"))?;
+    let probe = guest(
+        machines,
+        LINE,
+        &format!(
+            "echo | timeout 5 openssl s_client -connect 127.0.0.1:{COVER_PORT} -tls1_3 -brief 2>&1 || true"
+        ),
+        Duration::from_secs(15),
+    )?;
+    if !probe.contains("TLSv1.3") && !probe.contains("CONNECTION ESTABLISHED") {
+        return Err(format!("cover TLS probe failed: {probe}"));
+    }
     Ok(())
 }
 
