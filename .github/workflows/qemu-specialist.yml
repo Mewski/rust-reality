@@ -295,7 +295,7 @@ jobs:
                       if time.monotonic() > deadline or any(p.poll() is not None for p in children):
                           raise RuntimeError('guest provisioning boot failed: '+role)
                       time.sleep(2)
-                  run(ssh+['sudo cloud-init status --wait'],timeout=360,stdout=subprocess.DEVNULL)
+                  run(ssh+['sudo cloud-init status --wait'],timeout=720,stdout=subprocess.DEVNULL)
                   run(ssh+['command -v curl && command -v tc && test "$(wc -l < /proc/swaps)" = 1'],stdout=subprocess.DEVNULL)
               for spec in specs.values():
                   run(['ssh','-F','/dev/null','-i',str(root/'test-key'),'-o','UserKnownHostsFile='+str(root/'known_hosts'),'-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-p',str(spec['sshPort']),'rrtest@127.0.0.1','sudo poweroff'])
@@ -512,7 +512,7 @@ jobs:
                       if time.monotonic() > deadline or any(p.poll() is not None for p in children):
                           raise RuntimeError('guest provisioning boot failed: '+role)
                       time.sleep(2)
-                  run(ssh+['sudo cloud-init status --wait'],timeout=360,stdout=subprocess.DEVNULL)
+                  run(ssh+['sudo cloud-init status --wait'],timeout=720,stdout=subprocess.DEVNULL)
                   run(ssh+['command -v curl && command -v tc && test "$(wc -l < /proc/swaps)" = 1'],stdout=subprocess.DEVNULL)
               for spec in specs.values():
                   run(['ssh','-F','/dev/null','-i',str(root/'test-key'),'-o','UserKnownHostsFile='+str(root/'known_hosts'),'-o','StrictHostKeyChecking=yes','-o','BatchMode=yes','-p',str(spec['sshPort']),'rrtest@127.0.0.1','sudo poweroff'])
