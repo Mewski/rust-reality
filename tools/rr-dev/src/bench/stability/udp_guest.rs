@@ -353,7 +353,7 @@ fn start_origin(machines: &Machines) -> Result<(), String> {
     guest(
         machines,
         LANDING,
-        "sudo ip netns add rr-origin && sudo ip link add veth-origin type veth peer name veth-land && sudo ip link set veth-land netns rr-origin && sudo ip addr add 198.51.100.1/30 dev veth-origin && sudo ip link set veth-origin up && sudo ip netns exec rr-origin ip addr add 198.51.100.2/30 dev veth-land && sudo ip netns exec rr-origin ip link set veth-land up && sudo ip netns exec rr-origin ip link set lo up",
+        "sudo ip netns add rr-origin && sudo ip link add veth-origin type veth peer name veth-land && sudo ip link set veth-land netns rr-origin && sudo ip addr add 198.51.100.1/30 dev veth-origin && sudo ip link set veth-origin up && sudo ip netns exec rr-origin ip addr add 198.51.100.2/30 dev veth-land && sudo ip netns exec rr-origin ip link set veth-land up && sudo ip netns exec rr-origin ip link set lo up && sudo ip netns exec rr-origin ip route add 192.0.2.2/32 via 198.51.100.1 && sudo sysctl -w net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.veth-origin.rp_filter=0 net.ipv4.conf.default.rp_filter=0",
         Duration::from_secs(20),
     )?;
     guest(
@@ -391,6 +391,18 @@ fn start_origin(machines: &Machines) -> Result<(), String> {
     if !raw.contains("probe=PASS") {
         return Err(format!(
             "landing cannot reach origin: {raw}; {}",
+            log_tails(machines)
+        ));
+    }
+    let bound = guest(
+        machines,
+        LANDING,
+        "python3 -c 'import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind((\"192.0.2.2\", 0)); s.settimeout(3); s.sendto(b\"rr-guest-udp-proof\", (\"198.51.100.2\", 9)); data, peer = s.recvfrom(64); assert data==b\"rr-guest-udp-proof\", data; print(\"bound-probe=PASS\", peer[0])'",
+        Duration::from_secs(15),
+    )?;
+    if !bound.contains("bound-probe=PASS") {
+        return Err(format!(
+            "landing bound to {LANDING_IP} cannot reach origin: {bound}; {}",
             log_tails(machines)
         ));
     }
