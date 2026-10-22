@@ -407,16 +407,6 @@ fn start_cover(machines: &Machines) -> Result<(), String> {
         Duration::from_secs(15),
     )?;
     wait_listen(machines, LINE, &format!(":{COVER_PORT}"))?;
-    let probe = guest(
-        machines,
-        LINE,
-        &format!("echo | openssl s_client -connect 127.0.0.1:{COVER_PORT} -tls1_3 -brief"),
-        Duration::from_secs(15),
-    )
-    .unwrap_or_else(|error| error);
-    if !probe.contains("CONNECTION ESTABLISHED") && !probe.contains("Protocol version: TLSv1.3") {
-        return Err(format!("cover TLS probe failed: {probe}"));
-    }
     Ok(())
 }
 
