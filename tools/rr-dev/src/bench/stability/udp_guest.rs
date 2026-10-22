@@ -402,11 +402,22 @@ fn start_cover(machines: &Machines) -> Result<(), String> {
         machines,
         LINE,
         &format!(
-            "cd {HOME} && /usr/bin/setsid --fork /usr/bin/openssl s_server -tls1_3 -quiet -accept 127.0.0.1:{COVER_PORT} -cert {HOME}/cover.crt -key {HOME}/cover.key > cover.log 2>&1 < /dev/null"
+            "cd {HOME} && /usr/bin/setsid --fork /usr/bin/openssl s_server -tls1_3 -quiet -accept {COVER_PORT} -cert {HOME}/cover.crt -key {HOME}/cover.key > cover.log 2>&1 < /dev/null"
         ),
         Duration::from_secs(15),
     )?;
-    wait_listen(machines, LINE, &format!("127.0.0.1:{COVER_PORT}")).map(|_| ())
+    wait_listen(machines, LINE, &format!(":{COVER_PORT}"))?;
+    let probe = guest(
+        machines,
+        LINE,
+        &format!("echo | openssl s_client -connect 127.0.0.1:{COVER_PORT} -tls1_3 -brief"),
+        Duration::from_secs(15),
+    )
+    .unwrap_or_else(|error| error);
+    if !probe.contains("CONNECTION ESTABLISHED") && !probe.contains("Protocol version: TLSv1.3") {
+        return Err(format!("cover TLS probe failed: {probe}"));
+    }
+    Ok(())
 }
 
 fn start_product(machines: &Machines, role: &str, config: &str, log: &str) -> Result<(), String> {
@@ -673,7 +684,7 @@ fn configs(plan: &Plan, private: &Path, secrets: &mut Vec<String>) -> Result<Con
   "role": "entry",
   "listeners": [{{ "port": {ENTRY_PORT}, "ipv4": "127.0.0.1" }}],
   "reality": {{
-    "cover": "127.0.0.1:{COVER_PORT}",
+    "cover": "localhost:{COVER_PORT}",
     "privateKey": "{reality_private}",
     "serverNames": ["localhost"],
     "coverOptimization": {{ "enabled": false }}
@@ -712,7 +723,7 @@ fn configs(plan: &Plan, private: &Path, secrets: &mut Vec<String>) -> Result<Con
   "role": "entry",
   "listeners": [{{ "port": {ENTRY_PORT}, "ipv4": "127.0.0.1" }}],
   "reality": {{
-    "cover": "127.0.0.1:{COVER_PORT}",
+    "cover": "localhost:{COVER_PORT}",
     "privateKey": "{reality_private}",
     "serverNames": ["localhost"],
     "coverOptimization": {{ "enabled": false }}
