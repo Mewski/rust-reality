@@ -32,6 +32,7 @@ pub mod config;
 pub mod cover;
 pub mod deployment;
 pub mod deployment_cost;
+pub mod deployment_fixture;
 pub mod deployment_json;
 pub mod deployment_longflow;
 pub mod deployment_netns;
