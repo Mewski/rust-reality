@@ -29,16 +29,16 @@ mod deploy_cmd;
 mod docs;
 mod doctor;
 mod fuzz;
+mod fuzz_cmd;
 mod hash;
 mod perf;
+mod perf_cmd;
 mod process;
 mod release;
+mod release_cmd;
 mod repo;
 
-use cli::{
-    CiCommand, Cli, Command, ConfigCommand, DocsCommand, EnvironmentTool, FuzzCommand, PerfCommand,
-    ReleaseCommand, RepoCommand,
-};
+use cli::{CiCommand, Cli, Command, ConfigCommand, DocsCommand, RepoCommand};
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -46,9 +46,9 @@ fn main() -> ExitCode {
 
     match cli.command {
         Command::Doctor => run_doctor(),
-        Command::Perf { command } => run_perf(&repo, command),
-        Command::Release { command } => run_release(&repo, command),
-        Command::Fuzz { command } => run_fuzz(&repo, command),
+        Command::Perf { command } => perf_cmd::run_perf(&repo, command),
+        Command::Release { command } => release_cmd::run_release(&repo, command),
+        Command::Fuzz { command } => fuzz_cmd::run_fuzz(&repo, command),
         Command::Config { command } => match command {
             ConfigCommand::Schema { output } => match rust_reality::config::node::schema_json() {
                 Ok(schema) => {
@@ -203,280 +203,4 @@ fn run_doctor() -> ExitCode {
     }
     eprintln!("\nmissing requirements: {}", blocking.join(", "));
     ExitCode::FAILURE
-}
-
-/// Dispatches a `cargo dev perf` subcommand.
-#[allow(
-    clippy::too_many_lines,
-    reason = "each perf subcommand remains an explicit typed dispatch arm"
-)]
-fn run_perf(repo: &std::path::Path, command: PerfCommand) -> ExitCode {
-    match command {
-        PerfCommand::Evaluate { manifest, output } => {
-            match perf::report::evaluate_to_file(&manifest, &output) {
-                Ok(verdict) => {
-                    println!("{}: {}", verdict.as_str(), output.display());
-                    ExitCode::from(verdict.exit_code())
-                }
-                Err(error) => {
-                    // An argument or write failure, distinct from inadmissible
-                    // evidence: no report is produced at all.
-                    eprintln!("perf evaluate: {error}");
-                    ExitCode::from(2)
-                }
-            }
-        }
-        PerfCommand::Hotspot {
-            binary,
-            binary_sha256,
-            expected_source_commit,
-            pid,
-            out_dir,
-            run_id,
-            record_seconds,
-            event,
-            frequency,
-            call_graph,
-        } => {
-            match perf::hotspot::run(&perf::hotspot::Plan {
-                binary,
-                binary_sha256,
-                expected_source_commit,
-                server_pid: pid,
-                out_dir,
-                run_id,
-                record_seconds,
-                event,
-                frequency,
-                call_graph,
-            }) {
-                Ok(message) => {
-                    println!("{message}");
-                    ExitCode::SUCCESS
-                }
-                Err(error) => {
-                    eprintln!("perf hotspot: {error}");
-                    ExitCode::FAILURE
-                }
-            }
-        }
-        PerfCommand::Freeze { commit, out_dir } => {
-            match perf::freeze::run(&perf::freeze::Plan {
-                repo: repo.to_path_buf(),
-                commit,
-                out_dir,
-            }) {
-                Ok(message) => {
-                    println!("{message}");
-                    ExitCode::SUCCESS
-                }
-                Err(error) => {
-                    eprintln!("perf freeze: {error}");
-                    ExitCode::FAILURE
-                }
-            }
-        }
-        PerfCommand::HotspotBundle {
-            run_dir,
-            label,
-            dso_offset,
-            idalib_python,
-            timeout_seconds,
-            max_unmapped_period_percent,
-            unmapped_period_explanation,
-        } => match perf::hotspot::bundle::run(&perf::hotspot::bundle::Plan {
-            run_dir,
-            label,
-            dso_offset,
-            idalib_python,
-            timeout_seconds,
-            max_unmapped_period_percent,
-            unmapped_period_explanation,
-        }) {
-            Ok(message) => {
-                println!("{message}");
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
-                eprintln!("perf hotspot-bundle: {error}");
-                ExitCode::FAILURE
-            }
-        },
-        PerfCommand::Environment {
-            tool,
-            output,
-            binary,
-            binary_sha256,
-            command,
-        } => {
-            let kind = match tool {
-                EnvironmentTool::Stat => perf::environment::Kind::Stat,
-                EnvironmentTool::C2c => perf::environment::Kind::C2c,
-            };
-            match perf::environment::capture(
-                kind,
-                &perf::environment::Options {
-                    output: &output,
-                    binary: &binary,
-                    binary_sha256: &binary_sha256,
-                    command: &command,
-                },
-            ) {
-                Ok(message) => {
-                    println!("{message}");
-                    ExitCode::SUCCESS
-                }
-                Err(error) => {
-                    eprintln!("perf environment: {error}");
-                    ExitCode::FAILURE
-                }
-            }
-        }
-    }
-}
-
-/// Dispatches a `cargo dev release` subcommand.
-///
-/// Each stage prints its own success line and maps a domain error onto a single
-/// non-zero exit. Release stages are fail-closed: a stage that cannot prove its
-/// invariant returns an error rather than a partial success.
-fn run_release(repo: &std::path::Path, command: ReleaseCommand) -> ExitCode {
-    let result = match command {
-        ReleaseCommand::Matrix {
-            github_matrix,
-            tiers,
-        } => {
-            if github_matrix {
-                println!("{}", release::matrix::github_matrix());
-            } else if tiers {
-                println!("{}", release::matrix::Tier::ids().join(" "));
-            } else {
-                for tier in &release::matrix::TIERS {
-                    println!(
-                        "{}\t{}\t{}\t{}",
-                        tier.id, tier.target, tier.target_cpu, tier.runs_on
-                    );
-                }
-            }
-            Ok(String::new())
-        }
-        ReleaseCommand::VerifyTag { tag, main_ref } => {
-            release::verify_tag::verify(repo, &tag, &main_ref)
-        }
-        ReleaseCommand::Build { tier, build_only } => {
-            release::build::build(repo, &tier, build_only)
-        }
-        ReleaseCommand::Package { tag, tier, output } => {
-            release::package::package(&release::package::Options {
-                repo,
-                tag: &tag,
-                tier: &tier,
-                output: &output,
-                binary_override: std::env::var_os("RUST_REALITY_RELEASE_BIN").map(Into::into),
-                cargo_features: std::env::var("RUST_REALITY_CARGO_FEATURES").ok(),
-                measured_natively: std::env::var("RUST_REALITY_MEASURED_NATIVELY")
-                    .ok()
-                    .map(|value| value == "true"),
-            })
-            .map(|packaged| {
-                format!(
-                    "packaged {tier} -> {} (sha256 {}, fragment {})",
-                    packaged.archive.display(),
-                    packaged.sha256,
-                    packaged.fragment.display()
-                )
-            })
-        }
-        ReleaseCommand::Smoke {
-            tag,
-            tier,
-            assets,
-            receipt_dir,
-        } => release::smoke::smoke(repo, &tag, &tier, &assets, receipt_dir.as_deref()),
-        ReleaseCommand::Aggregate { tag, dist } => release::aggregate::aggregate(&dist, &tag),
-    };
-
-    match result {
-        Ok(message) => {
-            if !message.is_empty() {
-                println!("{message}");
-            }
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            eprintln!("{error}");
-            ExitCode::FAILURE
-        }
-    }
-}
-
-/// Dispatches a `cargo dev fuzz` subcommand.
-///
-/// `targets` prints the validated (optionally sharded) target list, one per line,
-/// as the retired `fuzz-targets.py` did. `smoke` runs the deterministic libFuzzer
-/// pass; with a shard it resolves that shard first, collapsing the shell pipeline
-/// `security.yml` used into one invocation.
-fn run_fuzz(repo: &std::path::Path, command: FuzzCommand) -> ExitCode {
-    match command {
-        FuzzCommand::Targets {
-            shard_index,
-            shard_count,
-        } => {
-            let names = match resolve_targets(repo, shard_index, shard_count) {
-                Ok(names) => names,
-                Err(error) => {
-                    eprintln!("{error}");
-                    return ExitCode::FAILURE;
-                }
-            };
-            println!("{}", names.join("\n"));
-            ExitCode::SUCCESS
-        }
-        FuzzCommand::Smoke {
-            targets,
-            shard_index,
-            shard_count,
-        } => {
-            let selected = if shard_index.is_some() || shard_count.is_some() {
-                if !targets.is_empty() {
-                    eprintln!("fuzz smoke: pass either explicit targets or a shard, not both");
-                    return ExitCode::FAILURE;
-                }
-                match resolve_targets(repo, shard_index, shard_count) {
-                    Ok(names) => names,
-                    Err(error) => {
-                        eprintln!("{error}");
-                        return ExitCode::FAILURE;
-                    }
-                }
-            } else {
-                targets
-            };
-            match fuzz::smoke::smoke(repo, &selected) {
-                Ok(message) => {
-                    println!("{message}");
-                    ExitCode::SUCCESS
-                }
-                Err(error) => {
-                    eprintln!("{error}");
-                    ExitCode::FAILURE
-                }
-            }
-        }
-    }
-}
-
-/// Resolves the full or sharded target list, requiring both shard arguments together.
-fn resolve_targets(
-    repo: &std::path::Path,
-    shard_index: Option<usize>,
-    shard_count: Option<usize>,
-) -> Result<Vec<String>, String> {
-    match (shard_index, shard_count) {
-        (None, None) => fuzz::targets::all(repo).map_err(|error| error.to_string()),
-        (Some(index), Some(count)) => {
-            fuzz::targets::shard(repo, index, count).map_err(|error| error.to_string())
-        }
-        _ => Err("--shard-index and --shard-count must be supplied together".to_owned()),
-    }
 }
